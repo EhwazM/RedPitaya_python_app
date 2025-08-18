@@ -2,9 +2,10 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QTabWidget, QDoubleSpinBox, QSpinBox,
-    QComboBox, QPushButton, QSizePolicy, QFormLayout, QRadioButton
+    QComboBox, QPushButton, QSizePolicy, QFormLayout,
+    QRadioButton, QStatusBar
 )
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from app.rp_plot.plot_setup import BokehPlot
 from app.rp_data_acquisition.serial_data import SerialData
@@ -92,7 +93,7 @@ class AcquisitionSettingsWidget(QWidget):
         self.decimation_level_spin.setRange(1, 16)
         self.decimation_level_spin.setValue(self.decimation_level)
         self.decimation_level_spin.valueChanged.connect(self.emit_trigger_settings)
-        layout.addRow("Decimation Level:", self.decimation_level_spin)
+        layout.addRow("Decimation Level (in powers of 2):", self.decimation_level_spin)
 
         self.setLayout(layout)
 
@@ -124,12 +125,23 @@ class Oscilloscope(QMainWindow):
         self.init_ui()
         self.create_menu_bar()
 
+        if self.rp_plot.osci:
+            self.change_osci_mode()
+        else:
+            self.change_to_real_time_mode()
+
     def init_ui(self):
         self.central_widget = QWidget()
         main_layout = QHBoxLayout(self.central_widget)
 
         # Sidebar
         sidebar_layout = QVBoxLayout()
+
+        # Crear barra de estado
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+
+        self.status_bar.showMessage("Waiting...")
 
         # Serial Settings
         self.ports_list = QComboBox()
@@ -151,8 +163,8 @@ class Oscilloscope(QMainWindow):
         update_ports_btn = QPushButton("Update Ports")
         update_ports_btn.clicked.connect(self.update_port_list)
 
-        serial_group = QGroupBox("Serial Settings")
-        serial_layout = QFormLayout(serial_group)
+        self.serial_group = QGroupBox("Serial Settings")
+        serial_layout = QFormLayout(self.serial_group)
         serial_layout.addRow("Available Ports:", self.ports_list)
         serial_layout.addRow("Baud Rate:", self.baud_rate_spin)
         serial_layout.addRow("Roll_Over:", self.roll_over_spin)
@@ -162,9 +174,8 @@ class Oscilloscope(QMainWindow):
         generator_tab = QTabWidget()
         generator_tab.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
-
         for ch in [1, 2]:
-            gen_widget = GeneratorSettingsWidget(channel=ch, on_change_callback=self.rp_plot.generate_signal_scpi)
+            gen_widget = GeneratorSettingsWidget(channel=ch, on_change_callback=self.rp_plot.generate_signal)
             generator_tab.addTab(gen_widget, f"CH{ch}")
 
         generator_group = QGroupBox("Generator Settings")
@@ -207,7 +218,7 @@ class Oscilloscope(QMainWindow):
 
         # Sidebar assembly
         sidebar_layout.addWidget(generator_group)
-        sidebar_layout.addWidget(serial_group)
+        sidebar_layout.addWidget(self.serial_group)
         sidebar_layout.addWidget(plot_options_group)
 
         # Add to main layout
@@ -247,6 +258,8 @@ class Oscilloscope(QMainWindow):
         self.max_y_spin.setValue(1.00)
         self.min_y_spin.setValue(-1.00)
         self.update_y_range()
+        self.serial_group.hide()
+        self.status_bar.showMessage("Changed to oscilloscope mode", 3000)
 
     def change_to_real_time_mode(self):
         self.ports_list.setCurrentText(self.default_port)
@@ -257,7 +270,11 @@ class Oscilloscope(QMainWindow):
         self.max_y_spin.setValue(3.33)
         self.min_y_spin.setValue(0)
         self.update_y_range()
+        self.serial_group.show()
+        self.status_bar.showMessage("Changed to real-time mode", 3000)
         
+    def show_status_bar_msg(self, msg, time=3000):
+        self.status_bar.showMessage(msg, time)
 
     def reset_all(self):
         self.rp_plot.sr_data.close() 
@@ -286,17 +303,25 @@ class Oscilloscope(QMainWindow):
         reset_all_action = QAction("Reset application", self)
         reset_all_action.triggered.connect(self.reset_all)
 
-        osci_mode_action = QAction("Change to oscillocope mode", self)
+        osci_mode_action = QAction("Change to oscillocope mode", self, checkable=True)
         osci_mode_action.triggered.connect(self.change_osci_mode)
 
-        real_time_mode_action = QAction("Change to real time mode", self)
+        real_time_mode_action = QAction("Change to real time mode", self, checkable=True)
         real_time_mode_action.triggered.connect(self.change_to_real_time_mode)
+
+        mode_group = QActionGroup(self)
+        mode_group.addAction(osci_mode_action)
+        mode_group.addAction(real_time_mode_action)
+        mode_group.setExclusive(True)
+
+        mode_menu = tools_menu.addMenu("Adquisition mode")
+        mode_menu.addActions([osci_mode_action, real_time_mode_action])
+
+        osci_mode_action.setChecked(self.rp_plot.osci)
 
         tools_menu.addActions([
             update_ports_action,
             reset_all_action,
-            osci_mode_action,
-            real_time_mode_action
             ])
 
         # Help menu

@@ -10,6 +10,9 @@ class ScpiData:
         self.rp = scpi.scpi(ip_address, port)
         self.decimation = int(2**3)
 
+    def connect(self):
+        self.rp = scpi.scpi(self.ip_address, self.port)
+
     def generate_signal(self, channel=1, frequency=15000, amplitude=0.75, offset=0.0, waveform='sine'):
         """
         Generate a waveform on channel {1|2}.
@@ -84,7 +87,7 @@ class ScpiData:
     def stop_acquisition(self):
         self.rp.tx_txt('ACQ:STOP')
 
-    def read_data(self, decimation=8, trigger_level=0.1, data_units='Volts', data_format='bin', trigger_source='NOW', timeout=5.0, center=0):
+    def read_data(self, decimation=8, trigger_level=0.1, data_units='Volts', data_format='bin', trigger_source='CH1_PE', timeout=5.0, center=0):
         self.decimation = decimation
         self.rp.tx_txt('ACQ:RST')
         self.rp.tx_txt(f'ACQ:DEC {int(decimation)}')
@@ -161,9 +164,6 @@ class ScpiData:
         except:
             pass
         return y1, y2
-    
-    def get_decimation(self):
-        return self.decimation
 
     def close(self):
         self.rp.close()

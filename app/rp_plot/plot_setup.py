@@ -67,7 +67,7 @@ class BokehPlot:
             self.periodic_callback = doc.add_periodic_callback(self.update_real_time, self.update_time)
     
     def update_oscilloscope_scpi(self):
-        decimation = self.rp.get_decimation()
+        decimation = self.rp.decimation
         if self.reading:
             try:
                 y1, y2 = self.rp.read_data(decimation=decimation)
@@ -150,6 +150,7 @@ class BokehPlot:
     def change_to_oscilloscope_mode(self):
         def _update():
             self.osci = True
+            self.plot_b.x_range = Range1d(start=0, end=60)
 
             if self.periodic_callback:
                 self.doc.remove_periodic_callback(self.periodic_callback)
@@ -191,13 +192,18 @@ class BokehPlot:
         else:
             print("Document not attached yet.")
 
-    def generate_signal(self, ch=1, vpp=1.5, fq=1e4, wf='sine'):
-        bash_cmd = f'generate {ch} {vpp} {fq} {wf}'
-        if self.sr_data.sr is not None and self.sr_data.sr.is_open:
-            self.sr_data.sr.write((bash_cmd + '\n').encode())
-            time.sleep(0.1)
+    def generate_signal(self, ch=1, vpp=1.5, fq=int(1e4), wf='sine'):
+        self.reading = True
 
-    def generate_signal_scpi(self, ch=1, vpp=1.5, fq:int=int(1e4), wf='SINE'):
-        self.rp.generate_signal(channel=ch, amplitude=vpp/2, frequency=fq, waveform=wf)
+        if self.osci:
+            self.rp.generate_signal(channel=ch, amplitude=vpp/2, frequency=fq, waveform=wf)
+        else:
+            bash_cmd = f'generate {ch} {vpp} {fq} {wf}'
+            if self.sr_data.sr is not None and self.sr_data.sr.is_open:
+                self.sr_data.sr.write((bash_cmd + '\n').encode())
+                time.sleep(0.1)
+
+        
+        
 
         

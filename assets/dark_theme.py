@@ -7,8 +7,12 @@
     }
 
     QWidget:disabled {
-        color: #777777;                 /* Texto más apagado */
-        background-color: #2a2a2a;      /* Fondo más oscuro */
+        color: #777777;
+        background-color: #2a2a2a;
+    }
+
+    QLabel, QCheckBox, QRadioButton, QGroupBox, QMenu, QTabBar::tab {
+        background: transparent;   /* ✅ sin fondo para textos simples */
     }
 
     QPushButton {
@@ -98,7 +102,7 @@
     }
 
     QTabBar::tab {
-        background-color: #2b2b2b;
+        background: transparent;
         color: #b1b1b1;
         padding: 8px 16px;
         border-top-left-radius: 4px;
@@ -132,7 +136,7 @@
 
     QListWidget::item:selected,
     QComboBox QAbstractItemView::item:selected {
-        background-color: #007acc;  /* Brighter blue */
+        background-color: #007acc;
         color: #ffffff;
     }
 
@@ -143,14 +147,14 @@
     }
 
     QMenuBar {
-        background-color: #2b2b2b;
+        background-color: #2b2b2b;  
         color: #dddddd;
         spacing: 3px;
         padding: 4px;
     }
 
     QMenuBar::item {
-        background-color: transparent;
+        background-color: #2b2b2b; 
         color: #dddddd;
         padding: 4px 10px;
     }
@@ -169,7 +173,7 @@
     }
 
     QMenu {
-        background-color: #2b2b2b;
+        background: #2b2b2b;
         color: #dddddd;
         border: 1px solid #5c5c5c;
     }
@@ -193,6 +197,6 @@
 
     QMenu:disabled {
         color: #777777;
-        background-color: #2a2a2a;
+        background-color: transparent;
     }
 """
