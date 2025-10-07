@@ -44,6 +44,9 @@ class SerialData:
                 except ValueError:
                     continue
             return last_data
+        else:
+            print("Serial port not open.")
+            return None
     
     def collect_data_bunch(self):
         if self.sr is not None and self.sr.is_open:
@@ -65,6 +68,9 @@ class SerialData:
             data_serial = data.split(',')
             # print("data: " + data_serial[0] + ", " + data_serial[1])
             return data_serial
+        else:
+            print("Serial port not open.")
+            return None
 
     def extract_bunch(self):
         active = False

@@ -12,7 +12,7 @@
     }
 
     QLabel, QCheckBox, QRadioButton, QGroupBox, QMenu, QTabBar::tab {
-        background: transparent;   /* ✅ sin fondo para textos simples */
+        background: transparent;
     }
 
     QPushButton {
@@ -46,6 +46,49 @@
 
     QCheckBox:disabled {
         color: #777777;
+    }
+
+    QCheckBox::indicator {
+        width: 16px;
+        height: 16px;
+        border: 1px solid #aaaaaa;
+        border-radius: 3px;
+        background: #2b2b2b;
+    }
+
+    QCheckBox::indicator:checked {
+        background-color: #007acc;
+        border: 1px solid #007acc;
+    }
+
+    QCheckBox::indicator:unchecked:hover {
+        border: 1px solid #ffffff;
+    }
+
+    QRadioButton {
+        spacing: 5px;
+        color: #dddddd;
+    }
+
+    QRadioButton:disabled {
+        color: #777777;
+    }
+
+    QRadioButton::indicator {
+        width: 16px;
+        height: 16px;
+        border: 1px solid #aaaaaa;
+        border-radius: 8px;
+        background: #2b2b2b;
+    }
+
+    QRadioButton::indicator:checked {
+        background-color: #007acc;
+        border: 1px solid #007acc;
+    }
+
+    QRadioButton::indicator:unchecked:hover {
+        border: 1px solid #ffffff;
     }
 
     QLineEdit, QTextEdit {

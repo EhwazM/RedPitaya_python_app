@@ -19,10 +19,10 @@ dark_theme = pyside6_simple_dark_theme
 
 serial_rp = serial.Serial(baudrate=115200)
 
-p = bk_figure(title="Signal", sizing_mode='stretch_both', x_axis_label='Time (s)', y_axis_label='Voltage (V)', y_range=Range1d(start=-1, end=1), x_range=Range1d(start=0, end=60)) # type: ignore
+p = bk_figure(title="Signal", sizing_mode='stretch_both', x_axis_label='Time (μs)', y_axis_label='Voltage (V)', y_range=Range1d(start=-1, end=1), x_range=Range1d(start=-30, end=30)) # type: ignore
     
 bokeh_plot = BokehPlot(plot_b=p,
-                        n_plots=2,
+                        n_plots=1,
                         roll_over=1000,
                         colors=['green', 'purple'],
                         update_time=10,

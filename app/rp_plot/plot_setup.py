@@ -26,6 +26,11 @@ class BokehPlot:
         self.sampling_rate = sampling_rate
         self.sr_data = SerialData(n_plots=n_plots)
         self.reading = False
+        self.decimation = int(2**3)
+        self.trigger_level = 0.0
+        self.trigger_source = "CH1_PE"  # CH1_PE, CH2_PE, EXT_PE, DISABLED
+        self.trigger_delay = 0  # en muestras, -8192 a 8192
+        self.rp = rp
 
         self.periodic_callback = None
         
@@ -67,10 +72,10 @@ class BokehPlot:
             self.periodic_callback = doc.add_periodic_callback(self.update_real_time, self.update_time)
     
     def update_oscilloscope_scpi(self):
-        decimation = self.rp.decimation
+
         if self.reading:
             try:
-                y1, y2 = self.rp.read_data(decimation=decimation)
+                y1, y2 = self.rp.read_data(decimation=self.decimation, trigger_level=self.trigger_level, trigger_source=self.trigger_source, center=self.trigger_delay)  # type: ignore
             except Exception as e:
                 print("SCPI read_data error:", e)
                 return
@@ -79,17 +84,33 @@ class BokehPlot:
                 print("SCPI returned empty arrays")
                 return
 
-            fs = float(self.sampling_rate) / decimation
-            t = np.arange(len(y1)) / fs  * 1e6
+            fs = float(self.sampling_rate) / self.decimation  # frecuencia de muestreo
+            n = min(len(y1), len(y2))  # nos aseguramos de que ambos tienen al menos n datos
+
+            # Si es impar, descartamos 1 para que sea par
+            if n % 2 != 0:
+                n -= 1
+                y1 = y1[:n]
+                y2 = y2[:n]
+
+            half = n // 2
+
+            # Cortamos al centro por seguridad
+            y1 = y1[:n]
+            y2 = y2[:n]
+
+            # eje de tiempo centrado en cero, en microsegundos
+            t = (np.arange(-half, half) / fs) * 1e6
 
         else:
             return
 
         try:
-            self.sources[0].stream(dict(x=t, y=y1), rollover=y1.shape[0])
-            self.sources[1].stream(dict(x=t, y=y2), rollover=y2.shape[0])
+            self.sources[0].stream(dict(x=t, y=y1), rollover=n)
+            self.sources[1].stream(dict(x=t, y=y2), rollover=n)
         except Exception as e:
             print("Bokeh stream error:", e)
+
 
     def update_real_time(self):
         if self.reading:
@@ -150,7 +171,7 @@ class BokehPlot:
     def change_to_oscilloscope_mode(self):
         def _update():
             self.osci = True
-            self.plot_b.x_range = Range1d(start=0, end=60)
+            self.plot_b.x_range = Range1d(start=-30, end=30)
 
             if self.periodic_callback:
                 self.doc.remove_periodic_callback(self.periodic_callback)
@@ -181,22 +202,104 @@ class BokehPlot:
         else:
             print("Document not attached yet.")
 
-    def change_scatter(self, checked : bool):
+    def change_scatter(self, checked: bool):
         def _update():
             self.scatter_plot = checked
-            for scatter in self.scatters:
-                scatter.visible = checked
-        
+            for ch in range(self.n_plots):
+                # visible si scatter está ON, el canal está activo y debe mostrarse
+                visible = checked and self.lines[ch].visible
+                if ch < len(self.scatters):
+                    self.scatters[ch].visible = visible
         if hasattr(self, "doc"):
             self.doc.add_next_tick_callback(_update)
         else:
             print("Document not attached yet.")
 
-    def generate_signal(self, ch=1, vpp=1.5, fq=int(1e4), wf='sine'):
+    def update_decimation(self, decim: int):
+        def _update():
+            nonlocal decim
+            if decim < 1:
+                decim = 1
+            elif decim > 16:
+                decim = 16
+            self.decimation = int(2**decim)
+
+        if hasattr(self, "doc"):
+            self.doc.add_next_tick_callback(_update)
+        else:
+            print("Document not attached yet.")
+    
+    def update_trigger_level(self, trigger_level: float = 0.0):
+        def _update():
+            nonlocal trigger_level
+            if trigger_level < -10.0:
+                trigger_level = -10.0
+            elif trigger_level > 10.0:
+                trigger_level = 10.0
+            self.trigger_level = float(trigger_level)
+
+        if hasattr(self, "doc"):
+            self.doc.add_next_tick_callback(_update)
+        else:
+            print("Document not attached yet.")
+
+    def update_trigger_delay(self, center: int = 0):
+        def _update():
+            nonlocal center
+            if center < -8192:
+                center = -8192
+            elif center > 8192:
+                center = 8192
+            self.trigger_delay = int(center)
+
+        if hasattr(self, "doc"):
+            self.doc.add_next_tick_callback(_update)
+        else:
+            print("Document not attached yet.")
+
+    def update_trigger_source(self, trigger_source: str = "CH1_PE"):
+        def _update():
+            nonlocal trigger_source
+            self.trigger_source = trigger_source
+
+        if hasattr(self, "doc"):
+            self.doc.add_next_tick_callback(_update)
+        else:
+            print("Document not attached yet.")
+
+    def generate_signal(self, values: dict):
+        ch = values['channel']
+        vpp = values['vpp']
+        fq = values['freq']
+        wf = values['waveform']
+        active = values['active']
+        show = values['show_plot']
+
+        if not active:
+            self.reading = False
+            def _hide():
+                self.lines[ch-1].visible = False
+                if ch-1 < len(self.scatters):
+                    self.scatters[ch-1].visible = False
+            if hasattr(self, "doc"):
+                self.doc.add_next_tick_callback(_hide)
+            return
+
         self.reading = True
 
+        def _update_visibility():
+            visible = active and show
+            self.lines[ch-1].visible = visible
+            if ch-1 < len(self.scatters):
+                # scatter solo se muestra si scatter_plot está activado también
+                self.scatters[ch-1].visible = visible and self.scatter_plot
+
+        if hasattr(self, "doc"):
+            self.doc.add_next_tick_callback(_update_visibility)
+
+        # Generación real de señal
         if self.osci:
-            self.rp.generate_signal(channel=ch, amplitude=vpp/2, frequency=fq, waveform=wf)
+            self.rp.generate_signal(channel=ch, amplitude=vpp/2, frequency=fq, waveform=wf) #type: ignore
         else:
             bash_cmd = f'generate {ch} {vpp} {fq} {wf}'
             if self.sr_data.sr is not None and self.sr_data.sr.is_open:
