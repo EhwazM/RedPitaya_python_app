@@ -1,4 +1,5 @@
 ﻿import time
+import pandas as pd
 import numpy as np
 
 from serial.tools import list_ports
@@ -30,7 +31,8 @@ class BokehPlot:
         self.trigger_level = 0.0
         self.trigger_source = "CH1_PE"  # CH1_PE, CH2_PE, EXT_PE, DISABLED
         self.trigger_delay = 0  # en muestras, -8192 a 8192
-        self.rp = rp
+        self.rp_ip = rp_ip
+        self.rp_connected = False
 
         self.periodic_callback = None
         
@@ -43,9 +45,17 @@ class BokehPlot:
             self.plot_b.x_range = DataRange1d()
 
         if rp is None:
-            self.rp = ScpiData(rp_ip)
+            try: 
+                self.rp = ScpiData(self.rp_ip)
+                self.rp_connected = self.rp.is_rp_connected()
+            except Exception as e:
+                print("Error initializing ScpiData:", e)    
         else:
-            self.rp = rp
+            try:
+                self.rp = rp
+                self.rp_connected = self.rp.is_rp_connected()
+            except Exception as e:
+                print("Error setting Red Pitaya instance:", e)
 
     def setup_plot(self):
         for i in range(self.n_plots):
@@ -306,7 +316,62 @@ class BokehPlot:
                 self.sr_data.sr.write((bash_cmd + '\n').encode())
                 time.sleep(0.1)
 
-        
-        
+    def save_current_data(self, filename: str):
+        # Tomamos la columna x de la primera fuente
+        df = pd.DataFrame({"x": self.sources[0].data["x"]})
 
-        
+        # Añadimos cada y_i
+        for i, src in enumerate(self.sources):
+            df[f"y{i}"] = src.data["y"]
+        df.to_csv(filename, index=False)
+
+    def test_function(self):
+        t = np.linspace(- int(2**5), int(2**5), int(1e3))
+        for i in range(self.n_plots):
+            new_data = dict(x=t, y=np.sin(0.05 * (2 * np.pi * (i + 1)) * t))
+
+            # Schedule the update safely on Bokeh’s event loop
+            self.doc.add_next_tick_callback(
+                lambda i=i, new_data=new_data: self.sources[i].stream(new_data, rollover=None)
+            )
+    
+    def update_rp_ip(self, new_ip: str):
+        def _update():
+            self.rp_connected = False
+            self.rp_ip = new_ip
+            self.rp.ip_address = new_ip
+
+            try:
+                self.rp.connect()
+                self.rp_connected = self.rp.is_rp_connected()
+            except Exception as e:
+                print("Error updating Red Pitaya IP:", e)
+                self.rp_connected = self.rp.is_rp_connected()
+                return
+
+            print(f"Updated Red Pitaya IP to: {self.rp_ip}")
+
+        if hasattr(self, "doc"):
+            self.doc.add_next_tick_callback(_update)
+        else:
+            print("Document not attached yet.")
+    
+    def auto_scale(self):
+        def _update():
+            all_y = []
+            for src in self.sources:
+                all_y.extend(src.data["y"])
+            if all_y:
+                min_y = min(all_y)
+                max_y = max(all_y)
+                padding = (max_y - min_y) * 0.1 if max_y != min_y else 1.0
+                self.plot_b.y_range.start = min_y - padding
+                self.plot_b.y_range.end = max_y + padding
+            else:
+                print("No data available for auto-scaling.")
+
+        if hasattr(self, "doc"):
+            self.doc.add_next_tick_callback(_update)
+        else:
+            print("Document not attached yet.")
+

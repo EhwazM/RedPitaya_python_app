@@ -91,6 +91,14 @@ class ScpiData:
     def stop_acquisition(self):
         self.rp.tx_txt('ACQ:STOP')
 
+    def is_rp_connected(self):
+        try:
+            self.rp.tx_txt("*IDN?")
+            _ = self.rp.rx_txt()
+            return True
+        except Exception:
+            return False
+
     def read_data(self, decimation=8, trigger_level=0.1, data_units='Volts', data_format='bin', trigger_source='CH1_PE', timeout=5.0, center=0):
         """
         Read acquired data from Red Pitaya.
@@ -130,7 +138,7 @@ class ScpiData:
 
         # 3. Start acquisition
         self.rp.tx_txt("ACQ:START")
-
+        
         # 4. Arm trigger last
         self.rp.tx_txt(f"ACQ:TRIG {trigger_source}")
 
@@ -199,19 +207,6 @@ class ScpiData:
         # y2_post = y2[8192:]
         # return y1_post, y2_post
 
-        # lag = compute_lag(y1, y2)
-
-        # if lag > 0:
-        #     y2_aligned = y2[lag:]
-        #     y1_aligned = y1[:len(y2_aligned)]
-        # elif lag < 0:
-        #     y1_aligned = y1[-lag:]
-        #     y2_aligned = y2[:len(y1_aligned)]
-        # else:
-        #     y1_aligned, y2_aligned = y1, y2
-
-        # return y1_aligned, y2_aligned
-
     def acq_setDecimation(self, value: int):
         self.rp.tx_txt(f"ACQ:DEC {value}")
 
@@ -221,8 +216,3 @@ class ScpiData:
 
     def close(self):
         self.rp.close()
-
-def compute_lag(signal1, signal2):
-        corr = np.correlate(signal1, signal2, mode='full')
-        lag = corr.argmax() - (len(signal1) - 1)
-        return lag

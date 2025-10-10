@@ -1,14 +1,17 @@
-﻿from PySide6.QtCore import QUrl, Qt
+﻿from PySide6.QtCore import QUrl, Qt, QSize, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QTabWidget, QDoubleSpinBox, QSpinBox,
     QComboBox, QPushButton, QSizePolicy, QFormLayout,
-    QRadioButton, QStatusBar, QLabel, QCheckBox, QGridLayout
+    QRadioButton, QStatusBar, QLabel, QCheckBox, QGridLayout,
+    QFileDialog,QMessageBox, QLineEdit
 )
 from PySide6.QtGui import QAction, QActionGroup, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from app.rp_plot.plot_setup import BokehPlot
 from app.rp_data_acquisition.serial_data import SerialData
+
+import csv
 
 class GeneratorSettingsWidget(QWidget):
     def __init__(self, channel: int, on_change_callback):
@@ -57,14 +60,14 @@ class GeneratorSettingsWidget(QWidget):
         self.show_plot.stateChanged.connect(self.emit_values)
         layout.addRow(self.show_plot)
 
-        # --- Buttons ---
-        self.generate_button = QPushButton("Generate Signal")
-        self.generate_button.pressed.connect(self.emit_values)
-        layout.addRow(self.generate_button)
+        # # --- Buttons ---
+        # self.generate_button = QPushButton("Generate Signal")
+        # self.generate_button.pressed.connect(self.emit_values)
+        # layout.addRow(self.generate_button)
 
-        self.default_button = QPushButton("Default Values")
-        self.default_button.pressed.connect(self.default_values)
-        layout.addRow(self.default_button)
+        # self.default_button = QPushButton("Default Values")
+        # self.default_button.pressed.connect(self.default_values)
+        # layout.addRow(self.default_button)
 
         self.setLayout(layout)
         self.emit_values()
@@ -133,6 +136,34 @@ class Oscilloscope(QMainWindow):
         generator_layout = QVBoxLayout(generator_group)
         generator_layout.addWidget(generator_tab)
 
+        ip_layout = QHBoxLayout()
+
+        redpitaya_ip = QLineEdit("Red Pitaya IP:")
+        redpitaya_ip.setText(self.rp_plot.rp_ip)
+        redpitaya_ip.textChanged.connect(self.rp_plot.update_rp_ip)
+        redpitaya_ip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ip_layout.addWidget(redpitaya_ip)
+
+        # Small color box
+        self.status_label = QLabel()
+        self.status_label.setFixedSize(12, 12)
+        self.status_label.setStyleSheet("""
+            background-color: red;
+            border-radius: 6px;
+        """)
+
+        ip_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignVCenter)
+        generator_layout.addLayout(ip_layout)
+
+        # Create a timer
+        self.check_timer = QTimer(self)
+        self.check_timer.timeout.connect(self.timer_multiprocess)
+        self.check_timer.start(50)  # every 1000 ms = 1 second
+
+        # Add to layout
+        ip_layout.addWidget(redpitaya_ip)
+        ip_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         self.acquiring_group = QGroupBox("Acquisition Settings")
         self.acquiring_layout = QFormLayout(self.acquiring_group)
 
@@ -199,11 +230,13 @@ class Oscilloscope(QMainWindow):
 
         # --- Plot Options ---
         self.max_y_spin = QDoubleSpinBox()
+        self.max_y_spin.setDecimals(4)
         self.max_y_spin.setRange(-100, 100)
         self.max_y_spin.setValue(self.rp_plot.plot_b.y_range.end)
         self.max_y_spin.setSingleStep(0.01)
 
         self.min_y_spin = QDoubleSpinBox()
+        self.min_y_spin.setDecimals(4)
         self.min_y_spin.setRange(-100, 100)
         self.min_y_spin.setValue(self.rp_plot.plot_b.y_range.start)
         self.min_y_spin.setSingleStep(0.01)
@@ -222,7 +255,19 @@ class Oscilloscope(QMainWindow):
         self.scatter_radio.setChecked(self.rp_plot.scatter_plot)
         self.scatter_radio.toggled.connect(self.rp_plot.change_scatter)
 
-        plot_options_group = QGroupBox("Voltage & Time Range")
+        # Export button
+        export_button = QPushButton("Export CSV")
+        export_button.clicked.connect(self.export_csv)
+
+        # Testing button
+        testing_button = QPushButton("Test Button")
+        testing_button.clicked.connect(self.rp_plot.test_function)
+
+        # Auto-Scale button
+        auto_scale_button = QPushButton("Auto-Scale")
+        auto_scale_button.clicked.connect(self.rp_plot.auto_scale)
+
+        plot_options_group = QGroupBox("Voltage / Time : Range")
         plot_options_layout = QVBoxLayout(plot_options_group)
 
         plot_options_layout.addWidget(self.scatter_radio)
@@ -233,48 +278,60 @@ class Oscilloscope(QMainWindow):
         spin_layout.addRow("Max t:", self.max_x_spin)
         spin_layout.addRow("Min t:", self.min_x_spin)
         plot_options_layout.addLayout(spin_layout)
+        plot_options_layout.addWidget(export_button)
+        plot_options_layout.addWidget(auto_scale_button)
+        # plot_options_layout.addWidget(testing_button)
 
         dpad_layout = QGridLayout()
         dpad_layout.addWidget(QLabel("Scale Control"), 0, 0, 1, 3, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        up_btn = QPushButton("▲")
-        down_btn = QPushButton("▼")
-        left_btn = QPushButton("◀")
-        right_btn = QPushButton("▶")
+        up_btn = QPushButton("+V")
+        down_btn = QPushButton("-V")
+        left_btn = QPushButton("-T")
+        right_btn = QPushButton("+T")
 
-        dpad_layout.addWidget(up_btn, 1, 1)
-        dpad_layout.addWidget(left_btn, 2, 0)
-        dpad_layout.addWidget(right_btn, 2, 2)
-        dpad_layout.addWidget(down_btn, 3, 1)
+        dpad_layout.addWidget(up_btn, 1, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        dpad_layout.addWidget(down_btn, 2, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        dpad_layout.addWidget(left_btn, 1, 0, 2, 1, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        dpad_layout.addWidget(right_btn, 1, 2, 2, 1, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        # Espaciado ajustado
+        dpad_layout.setVerticalSpacing(2)
+        dpad_layout.setHorizontalSpacing(10)
+
         plot_options_layout.addLayout(dpad_layout)
 
         def increase_voltage_scale():
             start, end = self.min_y_spin.value(), self.max_y_spin.value()
             mid = (start + end)/2
             new_range = (end-start)*1.1
-            self.min_y_spin.setValue(mid - new_range/2)
-            self.max_y_spin.setValue(mid + new_range/2)
+            self.rp_plot.update_y_range(min_val=mid - new_range/2, max_val=mid + new_range/2)
+            # self.min_y_spin.setValue(mid - new_range/2)
+            # self.max_y_spin.setValue(mid + new_range/2)
 
         def decrease_voltage_scale():
             start, end = self.min_y_spin.value(), self.max_y_spin.value()
             mid = (start + end)/2
             new_range = (end-start)*0.9
-            self.min_y_spin.setValue(mid - new_range/2)
-            self.max_y_spin.setValue(mid + new_range/2)
+            self.rp_plot.update_y_range(min_val=mid - new_range/2, max_val=mid + new_range/2)
+            # self.min_y_spin.setValue(mid - new_range/2)
+            # self.max_y_spin.setValue(mid + new_range/2)
 
         def increase_time_scale():
             start, end = self.min_x_spin.value(), self.max_x_spin.value()
             mid = (start + end)/2
             new_range = (end-start)*1.1
-            self.min_x_spin.setValue(mid - new_range/2)
-            self.max_x_spin.setValue(mid + new_range/2)
+            self.rp_plot.update_x_range(min_val=mid - new_range/2, max_val=mid + new_range/2)
+            # self.min_x_spin.setValue(mid - new_range/2)
+            # self.max_x_spin.setValue(mid + new_range/2)
 
         def decrease_time_scale():
             start, end = self.min_x_spin.value(), self.max_x_spin.value()
             mid = (start + end)/2
             new_range = (end-start)*0.9
-            self.min_x_spin.setValue(mid - new_range/2)
-            self.max_x_spin.setValue(mid + new_range/2)
+            self.rp_plot.update_x_range(min_val=mid - new_range/2, max_val=mid + new_range/2)
+            # self.min_x_spin.setValue(mid - new_range/2)
+            # self.max_x_spin.setValue(mid + new_range/2)
 
         # Conectar D-pad
         up_btn.clicked.connect(increase_voltage_scale)
@@ -283,10 +340,10 @@ class Oscilloscope(QMainWindow):
         right_btn.clicked.connect(increase_time_scale)
 
         # Sincronización Spinboxes ↔ Plot
-        self.min_y_spin.valueChanged.connect(lambda: self.rp_plot.update_y_range(min_val=self.min_y_spin.value(), max_val=self.max_y_spin.value()))
-        self.max_y_spin.valueChanged.connect(lambda: self.rp_plot.update_y_range(min_val=self.min_y_spin.value(), max_val=self.max_y_spin.value()))
-        self.min_x_spin.valueChanged.connect(lambda: self.rp_plot.update_x_range(min_val=self.min_x_spin.value(), max_val=self.max_x_spin.value()))
-        self.max_x_spin.valueChanged.connect(lambda: self.rp_plot.update_x_range(min_val=self.min_x_spin.value(), max_val=self.max_x_spin.value()))
+        self.min_y_spin.editingFinished.connect(lambda: self.rp_plot.update_y_range(min_val=self.min_y_spin.value(), max_val=self.max_y_spin.value()))
+        self.max_y_spin.editingFinished.connect(lambda: self.rp_plot.update_y_range(min_val=self.min_y_spin.value(), max_val=self.max_y_spin.value()))
+        self.min_x_spin.editingFinished.connect(lambda: self.rp_plot.update_x_range(min_val=self.min_x_spin.value(), max_val=self.max_x_spin.value()))
+        self.max_x_spin.editingFinished.connect(lambda: self.rp_plot.update_x_range(min_val=self.min_x_spin.value(), max_val=self.max_x_spin.value()))
 
         # --- Logos ---
         logo_layout = QHBoxLayout()
@@ -360,12 +417,45 @@ class Oscilloscope(QMainWindow):
     def show_status_bar_msg(self, msg, time=3000):
         self.status_bar.showMessage(msg, time)
 
+    def timer_multiprocess(self):
+        if self.rp_plot.rp_connected:
+            self.status_label.setStyleSheet("background-color: green; border-radius: 8px;")
+        else:
+            self.status_label.setStyleSheet("background-color: red; border-radius: 8px;")
+
+        if self.max_x_spin.hasFocus() or self.min_x_spin.hasFocus() or self.max_y_spin.hasFocus() or self.min_y_spin.hasFocus():
+            return  # No actualizar si alguno tiene el foco de edición
+        self.max_x_spin.setValue(self.rp_plot.plot_b.x_range.end)
+        self.min_x_spin.setValue(self.rp_plot.plot_b.x_range.start)
+        self.max_y_spin.setValue(self.rp_plot.plot_b.y_range.end)
+        self.min_y_spin.setValue(self.rp_plot.plot_b.y_range.start)
+
     def reset_all(self):
         self.rp_plot.sr_data.close() 
         self.ports_list.setCurrentText("None")
         self.baud_rate_spin.setValue(self.default_baudrate)
         self.max_y_spin.setValue(self.default_y_max)
         self.min_y_spin.setValue(self.default_y_min)
+
+    def export_csv(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save CSV File",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+
+        if not file_path.lower().endswith(".csv"):
+            file_path += ".csv"
+
+        if not file_path:
+            return
+
+        try:
+            data = self.rp_plot.save_current_data(file_path)
+            QMessageBox.information(self, "Success", f"CSV file saved:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save file:\n{e}")
 
     def create_menu_bar(self):
         menu_bar = self.menuBar()
