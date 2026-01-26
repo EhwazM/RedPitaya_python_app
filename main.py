@@ -13,6 +13,7 @@ from app.ui_pyside.oscilloscope import Oscilloscope
 
 from assets.dark_theme import pyside6_simple_dark_theme
 
+from queue import Queue
 import sys
 
 dark_theme = pyside6_simple_dark_theme
@@ -33,21 +34,46 @@ bokeh_plot = BokehPlot(plot_b=p,
 def modify_doc(doc, bokeh_plot):
   bokeh_plot.attach_doc(doc)
 
-def start_bokeh_server():
-    loop = IOLoop()
-    loop.make_current()
-    server = Server({'/': lambda doc: modify_doc(doc, bokeh_plot=bokeh_plot)}, io_loop=loop, allow_websocket_origin=["localhost:5006"])
-    server.start()
-    print("Bokeh server started at http://localhost:5006")
-    loop.start()
+def start_bokeh_server(port_queue):
+    port = 5006
+    while True:
+        try:
+            loop = IOLoop()
+            loop.make_current()
+            server = Server(
+                {'/': lambda doc: modify_doc(doc, bokeh_plot=bokeh_plot)},
+                io_loop=loop,
+                allow_websocket_origin=[f"localhost:{port}"],
+                port=port
+            )
+            server.start()
+            print(f"Bokeh server started at http://localhost:{port}")
+
+            # Send the port to the main thread *before* blocking the loop
+            port_queue.put(port)
+
+            loop.start()  # This blocks forever
+            break
+        except OSError:
+            print(f"Port {port} in use, trying {port + 1}...")
+            port += 1
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            port += 1
+
 
 if __name__ == '__main__':
-    Thread(target=start_bokeh_server, daemon=True).start()
+    port_queue = Queue()
+    thread = Thread(target=start_bokeh_server, args=(port_queue,), daemon=True)
+    thread.start()
+
+    # Wait until the Bokeh server thread sends back the port
+    port = port_queue.get()
 
     app = QApplication(sys.argv)
     app.setStyleSheet(dark_theme)
 
-    window = Oscilloscope(app, rp_plot=bokeh_plot, url='http://localhost:5006')
+    window = Oscilloscope(app, rp_plot=bokeh_plot, url=f'http://localhost:{port}')
     window.show()
 
     sys.exit(app.exec())

@@ -2,10 +2,7 @@
 import pandas as pd
 import numpy as np
 
-from serial.tools import list_ports
-
 from bokeh.models import ColumnDataSource
-from bokeh.plotting import figure as bk_figure
 from bokeh.models import Range1d, DataRange1d
 
 from app.rp_data_acquisition.scpi_data import ScpiData
@@ -301,15 +298,24 @@ class BokehPlot:
             visible = active and show
             self.lines[ch-1].visible = visible
             if ch-1 < len(self.scatters):
-                # scatter solo se muestra si scatter_plot está activado también
                 self.scatters[ch-1].visible = visible and self.scatter_plot
 
         if hasattr(self, "doc"):
             self.doc.add_next_tick_callback(_update_visibility)
 
-        # Generación real de señal
         if self.osci:
-            self.rp.generate_signal(channel=ch, amplitude=vpp/2, frequency=fq, waveform=wf) #type: ignore
+            try:
+                if not self.rp_connected:
+                    self.rp.connect()
+                    self.rp_connected = self.rp.is_rp_connected()
+                if self.rp_connected:
+                    self.rp.generate_signal(channel=ch, amplitude=vpp/2, frequency=fq, waveform=wf)
+                else:
+                    print("Not connected to Red Pitaya")
+            except Exception as e:
+                print("Error generating signal on Red Pitaya:", e)
+                self.rp_connected = self.rp.is_rp_connected()
+                return
         else:
             bash_cmd = f'generate {ch} {vpp} {fq} {wf}'
             if self.sr_data.sr is not None and self.sr_data.sr.is_open:
@@ -356,7 +362,7 @@ class BokehPlot:
         else:
             print("Document not attached yet.")
     
-    def auto_scale(self):
+    def auto_scale(self): #Only Y axis
         def _update():
             all_y = []
             for src in self.sources:

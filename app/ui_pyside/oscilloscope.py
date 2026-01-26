@@ -1,96 +1,15 @@
-﻿from PySide6.QtCore import QUrl, Qt, QSize, QTimer
+﻿from PySide6.QtCore import QUrl, Qt, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QTabWidget, QDoubleSpinBox, QSpinBox,
     QComboBox, QPushButton, QSizePolicy, QFormLayout,
-    QRadioButton, QStatusBar, QLabel, QCheckBox, QGridLayout,
+    QRadioButton, QStatusBar, QLabel, QGridLayout,
     QFileDialog,QMessageBox, QLineEdit
 )
 from PySide6.QtGui import QAction, QActionGroup, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from app.rp_plot.plot_setup import BokehPlot
-from app.rp_data_acquisition.serial_data import SerialData
-
-import csv
-
-class GeneratorSettingsWidget(QWidget):
-    def __init__(self, channel: int, on_change_callback):
-        super().__init__()
-        self.channel = channel
-        self.on_change_callback = on_change_callback
-
-        self.default_vpp = 1.5
-        self.default_freq = int(1e4)
-        self.default_waveform = "sine"
-
-        layout = QFormLayout()
-
-        # --- Vpp ---
-        self.vpp_spin = QDoubleSpinBox()
-        self.vpp_spin.setRange(0, 2)
-        self.vpp_spin.setDecimals(1)
-        self.vpp_spin.setSingleStep(0.1)
-        self.vpp_spin.setValue(self.default_vpp)
-        self.vpp_spin.valueChanged.connect(self.emit_values)
-        layout.addRow(f"CH{channel} Vpp:", self.vpp_spin)
-
-        # --- Frequency ---
-        self.freq_spin = QSpinBox()
-        self.freq_spin.setRange(0, int(6.25e7))
-        self.freq_spin.setSingleStep(100)
-        self.freq_spin.setValue(self.default_freq)
-        self.freq_spin.valueChanged.connect(self.emit_values)
-        layout.addRow(f"CH{channel} Frequency:", self.freq_spin)
-
-        # --- Waveform ---
-        self.waveform_combo = QComboBox()
-        self.waveform_combo.addItems(['sine','square','triangle','sawu','sawd','pwm','arbitrary','dc','dc_neg'])
-        self.waveform_combo.currentTextChanged.connect(self.emit_values)
-        layout.addRow(f"CH{channel} Waveform:", self.waveform_combo)
-
-        # --- Channel ON/OFF ---
-        self.channel_on = QCheckBox("Channel ON")
-        self.channel_on.setChecked(False)
-        self.channel_on.stateChanged.connect(self.emit_values)
-        layout.addRow(self.channel_on)
-
-        # --- Show/Hide Plot ---
-        self.show_plot = QCheckBox("Show Plot")
-        self.show_plot.setChecked(False)
-        self.show_plot.stateChanged.connect(self.emit_values)
-        layout.addRow(self.show_plot)
-
-        # # --- Buttons ---
-        # self.generate_button = QPushButton("Generate Signal")
-        # self.generate_button.pressed.connect(self.emit_values)
-        # layout.addRow(self.generate_button)
-
-        # self.default_button = QPushButton("Default Values")
-        # self.default_button.pressed.connect(self.default_values)
-        # layout.addRow(self.default_button)
-
-        self.setLayout(layout)
-        self.emit_values()
-
-    def emit_values(self):
-        # Solo emitir si el canal está activo
-        values = {
-            'channel': self.channel,
-            'vpp': self.vpp_spin.value(),
-            'freq': self.freq_spin.value(),
-            'waveform': self.waveform_combo.currentText(),
-            'active': self.channel_on.isChecked(),
-            'show_plot': self.show_plot.isChecked()
-        }
-        self.on_change_callback(values)
-
-    def default_values(self):
-        self.vpp_spin.setValue(self.default_vpp)
-        self.freq_spin.setValue(self.default_freq)
-        self.waveform_combo.setCurrentText(self.default_waveform)
-        self.channel_on.setChecked(True)
-        self.show_plot.setChecked(True)
-        self.emit_values()
+from app.ui_pyside.generator import GeneratorSettingsWidget
 
 class Oscilloscope(QMainWindow):
     def __init__(self, app, rp_plot: BokehPlot, url='http://localhost:5006/main'):
@@ -158,7 +77,11 @@ class Oscilloscope(QMainWindow):
         # Create a timer
         self.check_timer = QTimer(self)
         self.check_timer.timeout.connect(self.timer_multiprocess)
-        self.check_timer.start(50)  # every 1000 ms = 1 second
+        self.check_timer.start(500)  # every 500 ms
+
+        self.update_scales_timer = QTimer(self)
+        self.update_scales_timer.timeout.connect(self.update_scales_spins)
+        self.update_scales_timer.start(25)  # every 25 ms
 
         # Add to layout
         ip_layout.addWidget(redpitaya_ip)
@@ -366,6 +289,23 @@ class Oscilloscope(QMainWindow):
 
         self.setCentralWidget(self.central_widget)
 
+    def show_status_bar_msg(self, msg, time=3000):
+        self.status_bar.showMessage(msg, time)
+
+    def timer_multiprocess(self):
+        if self.rp_plot.rp_connected:
+            self.status_label.setStyleSheet("background-color: green; border-radius: 8px;")
+        else:
+            self.status_label.setStyleSheet("background-color: red; border-radius: 8px;")
+
+    def update_scales_spins(self):
+        if self.max_x_spin.hasFocus() or self.min_x_spin.hasFocus() or self.max_y_spin.hasFocus() or self.min_y_spin.hasFocus():
+            return  # No actualizar si alguno tiene el foco de edición
+        self.max_x_spin.setValue(self.rp_plot.plot_b.x_range.end)
+        self.min_x_spin.setValue(self.rp_plot.plot_b.x_range.start)
+        self.max_y_spin.setValue(self.rp_plot.plot_b.y_range.end)
+        self.min_y_spin.setValue(self.rp_plot.plot_b.y_range.start)
+
     def select_port(self, port_selected):
         self.rp_plot.sr_data.select_port(port_selected)
         if port_selected != "None":
@@ -414,22 +354,6 @@ class Oscilloscope(QMainWindow):
         self.acquiring_group.hide()
         self.status_bar.showMessage("Changed to real-time mode", 3000)
         
-    def show_status_bar_msg(self, msg, time=3000):
-        self.status_bar.showMessage(msg, time)
-
-    def timer_multiprocess(self):
-        if self.rp_plot.rp_connected:
-            self.status_label.setStyleSheet("background-color: green; border-radius: 8px;")
-        else:
-            self.status_label.setStyleSheet("background-color: red; border-radius: 8px;")
-
-        if self.max_x_spin.hasFocus() or self.min_x_spin.hasFocus() or self.max_y_spin.hasFocus() or self.min_y_spin.hasFocus():
-            return  # No actualizar si alguno tiene el foco de edición
-        self.max_x_spin.setValue(self.rp_plot.plot_b.x_range.end)
-        self.min_x_spin.setValue(self.rp_plot.plot_b.x_range.start)
-        self.max_y_spin.setValue(self.rp_plot.plot_b.y_range.end)
-        self.min_y_spin.setValue(self.rp_plot.plot_b.y_range.start)
-
     def reset_all(self):
         self.rp_plot.sr_data.close() 
         self.ports_list.setCurrentText("None")
@@ -445,11 +369,11 @@ class Oscilloscope(QMainWindow):
             "CSV Files (*.csv);;All Files (*)"
         )
 
-        if not file_path.lower().endswith(".csv"):
-            file_path += ".csv"
-
         if not file_path:
             return
+        
+        if not file_path.lower().endswith(".csv"):
+            file_path += ".csv"
 
         try:
             data = self.rp_plot.save_current_data(file_path)
