@@ -7,6 +7,7 @@ from bokeh.models import Range1d, DataRange1d
 
 from app.rp_data_acquisition.scpi_data import ScpiData
 from app.rp_data_acquisition.serial_data import SerialData
+from app.rp_lia.redpitaya_lia import RedPitayaLIA
 
 class BokehPlot:
     def __init__(self, plot_b, n_plots=2, baud_rate=115200 ,roll_over=5000, colors=['red', 'blue', 'green', 'yellow', 'orange', 'purple'], update_time=10, scatter_plot=False, oscilloscope_mode=False, sampling_rate=125e6, rp=None, rp_ip='rp-f0c5e4.local'):
@@ -118,7 +119,7 @@ class BokehPlot:
         except Exception as e:
             print("Bokeh stream error:", e)
 
-
+    
     def update_real_time(self):
         if self.reading:
             result = self.sr_data.collect_data()
@@ -381,3 +382,254 @@ class BokehPlot:
         else:
             print("Document not attached yet.")
 
+
+class LIABokehPlot:
+    """
+    Real-time Bokeh document for the FPGA Lock-In Amplifier.
+
+    A new LIABokehPlot instance must be created for every Bokeh document
+    session. Bokeh models (figures, ColumnDataSource, ranges, etc.) cannot
+    belong to more than one Document.
+    """
+
+    def __init__(
+        self,
+        host="10.42.0.100",
+        port=5001,
+        update_time=50,
+        roll_over=1000,
+    ):
+        self.host = host
+        self.port = port
+        self.update_time = max(10, int(update_time))
+        self.roll_over = max(1, int(roll_over))
+
+        self.lia = RedPitayaLIA(
+            host=self.host,
+            port=self.port,
+            timeout=5.0,
+        )
+
+        self.doc = None
+        self.periodic_callback = None
+        self.start = time.time()
+
+        self.sources = []
+        self.plots = []
+        self.layout = None
+
+        self.setup_plot()
+
+    def setup_plot(self):
+        from bokeh.layouts import column
+        from bokeh.models import Range1d
+        from bokeh.plotting import figure
+
+        plot_info = (
+            ("X / I", "I"),
+            ("Y / Q", "Q"),
+            ("R", "R"),
+            ("Phase", "Phase (rad)"),
+        )
+
+        for title, y_label in plot_info:
+            source = ColumnDataSource(
+                data={"x": [], "y": []}
+            )
+            self.sources.append(source)
+
+            plot = figure(
+                title=title,
+                height_policy="max",
+                width_policy="max",
+                sizing_mode="stretch_width",
+                x_axis_label="Time (s)",
+                y_axis_label=y_label,
+                tools=(
+                    "pan,wheel_zoom,box_zoom,"
+                    "reset,save"
+                ),
+            )
+
+            if title == "Phase":
+                plot.y_range = Range1d(
+                    start=-np.pi,
+                    end=np.pi,
+                )
+
+            plot.line(
+                "x",
+                "y",
+                source=source,
+                line_width=2,
+            )
+
+            self.plots.append(plot)
+
+        self.layout = column(
+            *self.plots,
+            sizing_mode="stretch_both",
+        )
+
+    def attach_doc(self, doc):
+        """
+        Attach this instance to exactly one Bokeh Document.
+
+        This method is called on a newly-created LIABokehPlot instance
+        for each /lia browser session.
+        """
+        if self.doc is not None:
+            raise RuntimeError(
+                "This LIABokehPlot instance is already attached "
+                "to a Bokeh document."
+            )
+
+        self.doc = doc
+        self.start = time.time()
+
+        doc.theme = "dark_minimal"
+        doc.add_root(self.layout)
+
+        try:
+            self.lia.connect()
+            print(
+                "LIA Bokeh connected to "
+                f"{self.host}:{self.port}"
+            )
+        except Exception as exc:
+            print(
+                "LIA Bokeh connection error:",
+                exc,
+            )
+
+        self.periodic_callback = doc.add_periodic_callback(
+            self.update_lia,
+            self.update_time,
+        )
+
+        doc.on_session_destroyed(
+            self._session_destroyed
+        )
+
+        print(
+            "LIA Bokeh acquisition started every "
+            f"{self.update_time} ms"
+        )
+
+    def _session_destroyed(self, session_context):
+        if self.doc is not None and self.periodic_callback is not None:
+            try:
+                self.doc.remove_periodic_callback(
+                    self.periodic_callback
+                )
+            except Exception:
+                pass
+
+        self.periodic_callback = None
+        self.lia.disconnect()
+
+        print("LIA Bokeh session disconnected.")
+
+    def update_lia(self):
+        if self.doc is None:
+            return
+
+        if not self.lia.connected:
+            try:
+                self.lia.connect()
+            except Exception as exc:
+                print(
+                    "LIA reconnect error:",
+                    exc,
+                )
+                return
+
+        try:
+            measurement = self.lia.get_measurement()
+            elapsed = time.time() - self.start
+
+            values = (
+                measurement["I"],
+                measurement["Q"],
+                measurement["R"],
+                measurement["phase"],
+            )
+
+            for source, value in zip(
+                self.sources,
+                values,
+            ):
+                source.stream(
+                    {
+                        "x": [elapsed],
+                        "y": [value],
+                    },
+                    rollover=self.roll_over,
+                )
+
+        except Exception as exc:
+            print(
+                "LIA Bokeh acquisition error:",
+                exc,
+            )
+
+    def update_roll_over(self, rollover):
+        self.roll_over = max(
+            1,
+            int(rollover),
+        )
+
+    def update_interval(self, interval_ms):
+        interval_ms = max(
+            10,
+            int(interval_ms),
+        )
+        self.update_time = interval_ms
+
+        if self.doc is None:
+            return
+
+        def restart_callback():
+            if self.periodic_callback is not None:
+                self.doc.remove_periodic_callback(
+                    self.periodic_callback
+                )
+
+            self.periodic_callback = (
+                self.doc.add_periodic_callback(
+                    self.update_lia,
+                    self.update_time,
+                )
+            )
+
+        self.doc.add_next_tick_callback(
+            restart_callback
+        )
+
+    def clear_data(self):
+        if self.doc is None:
+            return
+
+        def clear():
+            for source in self.sources:
+                source.data = {
+                    "x": [],
+                    "y": [],
+                }
+            self.start = time.time()
+
+        self.doc.add_next_tick_callback(clear)
+
+    def save_current_data(self, filename):
+        data = {
+            "time": self.sources[0].data["x"],
+            "X": self.sources[0].data["y"],
+            "Y": self.sources[1].data["y"],
+            "R": self.sources[2].data["y"],
+            "Phase": self.sources[3].data["y"],
+        }
+
+        pd.DataFrame(data).to_csv(
+            filename,
+            index=False,
+        )

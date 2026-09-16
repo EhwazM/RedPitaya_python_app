@@ -144,15 +144,18 @@ class ScpiData:
 
         start_time = time.time()
 
-        # Esperar trigger válido y buffer lleno
+        # Esperar trigger válido y buffer lleno.
+        # IMPORTANTE: comprobamos tanto que el trigger fue detectado (TD) como
+        # que el buffer está lleno (1). Comprobar solo FILL puede dar falsos
+        # positivos con el buffer pre-trigger, lo que producía lecturas
+        # inestables/erróneas, sobre todo en el canal leído en segundo lugar.
         while True:
-            # self.rp.tx_txt("ACQ:TRIG:STAT?")
-            # trig_stat = (self.rp.rx_txt() or "").strip()
+            self.rp.tx_txt("ACQ:TRIG:STAT?")
+            trig_stat = (self.rp.rx_txt() or "").strip()
             self.rp.tx_txt("ACQ:TRIG:FILL?")
             fill_stat = (self.rp.rx_txt() or "").strip()
 
-            # if trig_stat == "TD" and fill_stat == "1":  # Trigger Detected and Buffer Full
-            if fill_stat == "1":
+            if trig_stat == "TD" and fill_stat == "1":  # Trigger Detected and Buffer Full
                 break
             if time.time() - start_time > timeout:
                 try:
@@ -160,6 +163,18 @@ class ScpiData:
                 except:
                     pass
                 raise TimeoutError("Timeout esperando trigger y llenado de buffer")
+
+        # IMPORTANTE: detenemos la adquisición ANTES de leer cualquier canal.
+        # Si no se detiene aquí, el buffer circular sigue escribiéndose
+        # mientras leemos CH1 (round-trip + parseo binario), de modo que
+        # cuando se lee CH2 puede corresponder a una ventana de tiempo
+        # distinta (desplazada o parcialmente sobrescrita) a la de CH1.
+        # Esto es lo que causaba que el segundo canal se viera "inestable"
+        # o con lecturas falsas mientras el primero se veía bien.
+        try:
+            self.rp.tx_txt("ACQ:STOP")
+        except:
+            pass
 
         def _read_channel_ascii(cmd):
             self.rp.tx_txt(cmd)
@@ -195,11 +210,6 @@ class ScpiData:
             y2 = _read_channel_bin("ACQ:SOUR2:DATA?")
         else:
             raise ValueError(f"Formato desconocido: {data_format}")
-
-        try:
-            self.rp.tx_txt("ACQ:STOP")
-        except:
-            pass
 
         return y1, y2
 
