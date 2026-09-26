@@ -8,6 +8,7 @@ dependencies = [
     "bokeh>=3.9.0",
     "numpy>=2.4.4",
     "pandas>=3.0.2",
+    "paramiko>=5.0.0",
     "pyserial>=3.5",
     "pyside6>=6.11.0",
 ]

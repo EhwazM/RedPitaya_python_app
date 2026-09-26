@@ -1,5 +1,6 @@
-﻿from PySide6.QtCore import QUrl, Qt, QTimer
+﻿from PySide6.QtCore import QUrl, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QTabWidget, QDoubleSpinBox, QSpinBox,
     QComboBox, QPushButton, QSizePolicy, QFormLayout,
@@ -27,11 +28,19 @@ class Oscilloscope(QMainWindow):
     CONNECTION_POLL_INTERVAL_MS = 500
     RANGE_SYNC_INTERVAL_MS = 25
 
+    # Emitted when this window closes and control should return to the
+    # application selector (as opposed to the whole app quitting).
+    back_to_menu = Signal()
+
     def __init__(self, app, rp_plot: BokehPlot, url='http://localhost:5006/main'):
         super().__init__()
         self.app = app
         self.rp_plot = rp_plot
         self.setWindowTitle("Oscilloscope Control Panel")
+
+        # Closing this window normally hands control back to the main
+        # menu; only an explicit "Exit" quits the whole application.
+        self._quit_app_on_close = False
 
         # Default values
         self.default_port = "None"
@@ -80,8 +89,10 @@ class Oscilloscope(QMainWindow):
     def _build_generator_group(self) -> QGroupBox:
         generator_tabs = QTabWidget()
         generator_tabs.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.generator_widgets = []
         for ch in (1, 2):
             gen_widget = GeneratorSettingsWidget(channel=ch, on_change_callback=self.rp_plot.generate_signal)
+            self.generator_widgets.append(gen_widget)
             generator_tabs.addTab(gen_widget, f"CH{ch}")
 
         redpitaya_ip = QLineEdit(self.rp_plot.rp_ip)
@@ -352,6 +363,41 @@ class Oscilloscope(QMainWindow):
         self.max_y_spin.setValue(self.default_y_max)
         self.min_y_spin.setValue(self.default_y_min)
 
+    def reset_to_defaults(self):
+        """Return the whole panel (generator, acquisition, plot) to its
+        initial defaults. Called before handing control back to the main
+        menu so the next time this window is opened it starts clean."""
+        for gen_widget in getattr(self, "generator_widgets", []):
+            # Turns the channel off and restores its default vpp/frequency
+            # /waveform via the existing on_change_callback.
+            gen_widget.default_values()
+        self.reset_all()
+        self.change_to_real_time_mode()
+
+    # ------------------------------------------------------------------ #
+    # Navigation
+    # ------------------------------------------------------------------ #
+    def go_back_to_menu(self):
+        """Close this window and return to the application selector."""
+        self._quit_app_on_close = False
+        self.reset_to_defaults()
+        self.close()
+
+    def exit_application(self):
+        """Close this window and quit the whole application."""
+        self._quit_app_on_close = True
+        self.close()
+
+    def closeEvent(self, event):
+        self.check_timer.stop()
+        self.update_scales_timer.stop()
+        event.accept()
+
+        if self._quit_app_on_close:
+            QApplication.instance().quit()
+        else:
+            self.back_to_menu.emit()
+
     # ------------------------------------------------------------------ #
     # Export
     # ------------------------------------------------------------------ #
@@ -376,9 +422,14 @@ class Oscilloscope(QMainWindow):
     def create_menu_bar(self):
         menu_bar = self.menuBar()
 
+        back_action = QAction("\u25C0 Main Menu", self)
+        back_action.setStatusTip("Return to the Red Pitaya application selector")
+        back_action.triggered.connect(self.go_back_to_menu)
+        menu_bar.addAction(back_action)
+
         file_menu = menu_bar.addMenu("File")
         exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(self.close)
+        exit_action.triggered.connect(self.exit_application)
         file_menu.addAction(exit_action)
 
         menu_bar.addMenu("Edit")  # placeholder, no actions yet
@@ -407,6 +458,10 @@ class Oscilloscope(QMainWindow):
         reset_all_action.triggered.connect(self.reset_all)
 
         tools_menu.addActions([update_ports_action, reset_all_action])
+
+        tools_back_action = QAction("Back to Main Menu", self)
+        tools_back_action.triggered.connect(self.go_back_to_menu)
+        tools_menu.addAction(tools_back_action)
 
         help_menu = menu_bar.addMenu("Help")
         about_action = QAction("About", self)

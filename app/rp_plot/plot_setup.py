@@ -414,7 +414,7 @@ class LIABokehPlot:
         self.periodic_callback = None
         self.start = time.time()
 
-        self.sources = []
+        self.source = None
         self.plots = []
         self.layout = None
 
@@ -422,22 +422,27 @@ class LIABokehPlot:
 
     def setup_plot(self):
         from bokeh.layouts import column
-        from bokeh.models import Range1d
+        from bokeh.models import Button, Range1d
         from bokeh.plotting import figure
 
         plot_info = (
-            ("X / I", "I"),
-            ("Y / Q", "Q"),
-            ("R", "R"),
-            ("Phase", "Phase (rad)"),
+            ("X / I", "I", "I"),
+            ("Y / Q", "Q", "Q"),
+            ("R", "R", "R"),
+            ("Phase", "Phase (rad)", "Phase"),
         )
 
-        for title, y_label in plot_info:
-            source = ColumnDataSource(
-                data={"x": [], "y": []}
-            )
-            self.sources.append(source)
+# --------------------------------------------------------------
+# One shared ColumnDataSource with a column per channel, instead
+# of four separate sources. Streaming to it once per tick sends a
+# single patch to the browser instead of four, which cuts the
+# per-tick server -> client sync overhead by 4x.
+# --------------------------------------------------------------
+        self.source = ColumnDataSource(
+            data={"x": [], "I": [], "Q": [], "R": [], "Phase": []}
+        )
 
+        for title, y_label, column_name in plot_info:
             plot = figure(
                 title=title,
                 height_policy="max",
@@ -459,14 +464,27 @@ class LIABokehPlot:
 
             plot.line(
                 "x",
-                "y",
-                source=source,
+                column_name,
+                source=self.source,
                 line_width=2,
             )
 
             self.plots.append(plot)
 
+# --------------------------------------------------------------
+# Hidden trigger button: lets an embedding client (e.g. the Qt
+# sidebar's "Clear Plot" button) clear the live data in place,
+# without reloading the page or dropping this session, by
+# "clicking" it via injected JavaScript matched on its label.
+# --------------------------------------------------------------
+        self.clear_button = Button(
+            label="ClearTrigger",
+            visible=False,
+        )
+        self.clear_button.on_click(self.clear_data)
+
         self.layout = column(
+            self.clear_button,
             *self.plots,
             sizing_mode="stretch_both",
         )
@@ -548,24 +566,19 @@ class LIABokehPlot:
             measurement = self.lia.get_measurement()
             elapsed = time.time() - self.start
 
-            values = (
-                measurement["I"],
-                measurement["Q"],
-                measurement["R"],
-                measurement["phase"],
+# Single combined stream() call instead of one per subplot: cuts
+# the number of server -> browser sync messages sent each tick
+# from 4 down to 1.
+            self.source.stream(
+                {
+                    "x": [elapsed],
+                    "I": [measurement["I"]],
+                    "Q": [measurement["Q"]],
+                    "R": [measurement["R"]],
+                    "Phase": [measurement["phase"]],
+                },
+                rollover=self.roll_over,
             )
-
-            for source, value in zip(
-                self.sources,
-                values,
-            ):
-                source.stream(
-                    {
-                        "x": [elapsed],
-                        "y": [value],
-                    },
-                    rollover=self.roll_over,
-                )
 
         except Exception as exc:
             print(
@@ -611,22 +624,24 @@ class LIABokehPlot:
             return
 
         def clear():
-            for source in self.sources:
-                source.data = {
-                    "x": [],
-                    "y": [],
-                }
+            self.source.data = {
+                "x": [],
+                "I": [],
+                "Q": [],
+                "R": [],
+                "Phase": [],
+            }
             self.start = time.time()
 
         self.doc.add_next_tick_callback(clear)
 
     def save_current_data(self, filename):
         data = {
-            "time": self.sources[0].data["x"],
-            "X": self.sources[0].data["y"],
-            "Y": self.sources[1].data["y"],
-            "R": self.sources[2].data["y"],
-            "Phase": self.sources[3].data["y"],
+            "time": self.source.data["x"],
+            "X": self.source.data["I"],
+            "Y": self.source.data["Q"],
+            "R": self.source.data["R"],
+            "Phase": self.source.data["Phase"],
         }
 
         pd.DataFrame(data).to_csv(
