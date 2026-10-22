@@ -6,7 +6,7 @@ from queue import Queue
 from threading import Thread
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -329,11 +329,33 @@ class ModeSelector(QMainWindow):
         )
         help_menu.addAction(about_action)
 
+    def _build_logo_row(self) -> QHBoxLayout:
+        layout = QHBoxLayout()
+
+        self.uni_logo = QLabel()
+        self.uni_logo.setPixmap(
+            QPixmap("assets/ua.png").scaledToWidth(75)
+        )
+
+        self.group_logo = QLabel()
+        self.group_logo.setPixmap(
+            QPixmap("assets/geoel.png").scaledToWidth(100)
+        )
+
+        layout.addWidget(self.uni_logo)
+        layout.addStretch(1)
+        layout.addWidget(self.group_logo)
+
+        return layout
+
     def _build_ui(self):
         central = QWidget()
         outer = QVBoxLayout(central)
         outer.setContentsMargins(48, 40, 48, 32)
         outer.setSpacing(6)
+
+        outer.addLayout(self._build_logo_row())
+        outer.addSpacing(12)
 
         title = QLabel("Red Pitaya Control Suite")
         title.setAlignment(Qt.AlignCenter)
@@ -378,6 +400,14 @@ class ModeSelector(QMainWindow):
         self.status_label.setStyleSheet("color: #b1b1b1; font-size: 12px;")
         outer.addWidget(self.status_label)
         outer.addStretch(1)
+
+        authors_label = QLabel(
+            "Dewin Andrés Soto Cabeza  \u2022  "
+            "Professor Francisco Juan Racedo Niebles"
+        )
+        authors_label.setAlignment(Qt.AlignCenter)
+        authors_label.setStyleSheet("color: #888888; font-size: 11px;")
+        outer.addWidget(authors_label)
 
         self.setCentralWidget(central)
 

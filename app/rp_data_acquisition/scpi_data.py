@@ -1,22 +1,28 @@
 ﻿import numpy as np
 import app.redpitaya_scpi.redpitaya_scpi as scpi
 import time
-import struct
+
+RING_SIZE = 16384          # samples per channel in the Red Pitaya acquisition buffer
+ADC_CLOCK = 125e6
+
 
 class ScpiData:
     def __init__(self, ip_address, port=5000):
         self.ip_address = ip_address
         self.port = port
-        self.rp = scpi.scpi(ip_address, port)
+        # NOTE: scpi.scpi(host, timeout, port) -> pass the port by keyword
+        self.rp = scpi.scpi(ip_address, port=port)
         self.decimation = int(2**3)
+        self.window = 8192            # samples returned per frame (centred on the trigger)
+        self.last_triggered = True    # False if a software trigger found no edge (free-run frame)
 
     def connect(self):
-        self.rp = scpi.scpi(self.ip_address, self.port)
+        self.rp = scpi.scpi(self.ip_address, port=self.port)
 
     def generate_signal(self, channel=1, frequency=15000, amplitude=0.75, offset=0.0, waveform='sine'):
         """
         Generate a waveform on channel {1|2}.
-        
+
         Parameters
         ----------
         channel : 1 or 2
@@ -99,123 +105,132 @@ class ScpiData:
         except Exception:
             return False
 
-    def read_data(self, decimation=8, trigger_level=0.1, data_units='Volts', data_format='bin', trigger_source='CH1_PE', timeout=5.0, center=0):
-        """
-        Read acquired data from Red Pitaya.
+    def _read_block(self, cmd):
+        """Send a query that returns a binary block of big-endian float32 and parse it."""
+        self.rp.tx_txt(cmd)
+        raw = self.rp.rx_arb()
+        if not raw:
+            raise ValueError(f"Empty response for {cmd}")
+        n = (len(raw) // 4) * 4
+        return np.frombuffer(bytes(raw[:n]), dtype=">f4").astype(float)
 
-        Parameters
-        ----------
-        decimation : int
-        trigger_level : float
-        data_units : str
-            "Volts" or "Raw"
-        data_format : str
-            "ascii" or "bin"
-        trigger_source : str
-            e.g. "CH1_PE", "CH2_PE", "EXT_PE", "NOW"
-        timeout : float
-            seconds
-        center : int
-            trigger delay in samples (0–16384)
+    # CHx edge triggers are applied in software on a free-running capture
+    _SW_TRIGGERS = {'CH1_PE': (0, True), 'CH1_NE': (0, False),
+                    'CH2_PE': (1, True), 'CH2_NE': (1, False)}
+
+    @staticmethod
+    def _window(y, trig_idx, pre, post, delay=0):
+        """Cut pre+post samples around trig_idx (shifted by delay); anything outside the data is NaN."""
+        start = trig_idx - pre + delay
+        out = np.full(pre + post, np.nan)
+        lo, hi = max(start, 0), min(start + pre + post, len(y))
+        if hi > lo:
+            out[lo - start:hi - start] = y[lo:hi]
+        return out
+
+    @staticmethod
+    def _find_edge(y, level, rising, lo, hi):
+        """First index in [lo, hi) where y crosses `level` in the given direction, or None."""
+        a, b = y[lo - 1:hi - 1], y[lo:hi]
+        cross = ((a < level) & (b >= level)) if rising else ((a > level) & (b <= level))
+        idx = np.flatnonzero(cross)
+        return lo + int(idx[0]) if idx.size else None
+
+    def read_data(self, decimation=8, trigger_level=0.1, data_units='Volts', data_format='bin',
+                  trigger_source='CH1_PE', timeout=5.0, center=0):
+        """
+        Acquire one frame from both channels.
 
         Returns
         -------
-        y1, y2 : np.ndarray
-            acquired data from channels 1 and 2
+        y1, y2 : np.ndarray, `self.window` samples each (default 8192)
+            The trigger sits at index window//2 - center, so a time axis of
+            arange(-half, half)/fs has t = 0 at the trigger (for center = 0).
+
+        How it works (found by testing on a STEMlab 125-14, OS 2.0):
+          * ACQ:SOUR2:DATA? returned the raw circular buffer without unrolling it,
+            so we read the raw ring of both channels and unroll it ourselves.
+          * The hardware pre-trigger half was sometimes partly stale (left over
+            from earlier frames). So we always capture with trigger delay 8192
+            (every sample written after the trigger, fresh and contiguous) and
+            apply CH1/CH2 edge triggers in software on that capture. Pre- and
+            post-trigger data are then both fresh and locked.
+          * EXT_*/AWG_* use the hardware trigger; their pre-trigger part is NaN.
+          * If no edge is found, the frame is free-run (centred, unlocked) and
+            self.last_triggered is set to False.
+        `center` is a trigger delay in samples (clamped to +-4096); `data_format`
+        is ignored (always binary).
         """
-
         self.decimation = decimation
+        src = str(trigger_source).upper()
+        sw = self._SW_TRIGGERS.get(src)
+        hw_source = 'NOW' if (sw is not None or src == 'DISABLED') else src
 
-        # 1. Reset first
+        # 1. Reset first, then configure
         self.rp.tx_txt("ACQ:RST")
-
-        # 2. Configure all acquisition parameters
-        self.rp.tx_txt(f"ACQ:DATA:FORMAT {data_format.upper()}")
+        self.rp.tx_txt("ACQ:DATA:FORMAT BIN")
         self.rp.tx_txt(f"ACQ:DATA:UNITS {data_units.upper()}")
         self.rp.tx_txt(f"ACQ:DEC {int(decimation)}")
-        self.rp.tx_txt(f"ACQ:TRIG:DLY {int(center)}")
+        self.rp.tx_txt("ACQ:TRIG:DLY 8192")
         self.rp.tx_txt(f"ACQ:TRIG:LEV {float(trigger_level)}")
 
-        # 3. Start acquisition
+        # 2. Start, give the buffer a moment (kept from the tested sequence), then arm
         self.rp.tx_txt("ACQ:START")
-        
-        # 4. Arm trigger last
-        self.rp.tx_txt(f"ACQ:TRIG {trigger_source}")
+        time.sleep(min(RING_SIZE * int(decimation) / ADC_CLOCK * 1.5 + 0.01, 0.1))
+        self.rp.tx_txt(f"ACQ:TRIG {hw_source}")
 
+        # 3. Wait for trigger detected AND buffer full
         start_time = time.time()
-
-        # Esperar trigger válido y buffer lleno.
-        # IMPORTANTE: comprobamos tanto que el trigger fue detectado (TD) como
-        # que el buffer está lleno (1). Comprobar solo FILL puede dar falsos
-        # positivos con el buffer pre-trigger, lo que producía lecturas
-        # inestables/erróneas, sobre todo en el canal leído en segundo lugar.
         while True:
             self.rp.tx_txt("ACQ:TRIG:STAT?")
             trig_stat = (self.rp.rx_txt() or "").strip()
             self.rp.tx_txt("ACQ:TRIG:FILL?")
             fill_stat = (self.rp.rx_txt() or "").strip()
-
-            if trig_stat == "TD" and fill_stat == "1":  # Trigger Detected and Buffer Full
+            if trig_stat == "TD" and fill_stat == "1":
                 break
             if time.time() - start_time > timeout:
                 try:
                     self.rp.tx_txt("ACQ:STOP")
-                except:
+                except Exception:
                     pass
-                raise TimeoutError("Timeout esperando trigger y llenado de buffer")
+                raise TimeoutError("Timeout waiting for trigger and full buffer")
+            time.sleep(0.0005)
 
-        # IMPORTANTE: detenemos la adquisición ANTES de leer cualquier canal.
-        # Si no se detiene aquí, el buffer circular sigue escribiéndose
-        # mientras leemos CH1 (round-trip + parseo binario), de modo que
-        # cuando se lee CH2 puede corresponder a una ventana de tiempo
-        # distinta (desplazada o parcialmente sobrescrita) a la de CH1.
-        # Esto es lo que causaba que el segundo canal se viera "inestable"
-        # o con lecturas falsas mientras el primero se veía bien.
-        try:
-            self.rp.tx_txt("ACQ:STOP")
-        except:
-            pass
+        # 4. Read the raw rings plus the write pointer (index of the newest sample)
+        wpos = int(self.rp.txrx_txt("ACQ:WPOS?"))
+        ring1 = self._read_block(f"ACQ:SOUR1:DATA:START:END? 0,{RING_SIZE - 1}")
+        ring2 = self._read_block(f"ACQ:SOUR2:DATA:START:END? 0,{RING_SIZE - 1}")
+        wpos_after = int(self.rp.txrx_txt("ACQ:WPOS?"))
 
-        def _read_channel_ascii(cmd):
-            self.rp.tx_txt(cmd)
-            raw = (self.rp.rx_txt() or "").strip()
-            if not raw:
-                raise ValueError(f"Respuesta vacía para {cmd}")
-            raw = raw.strip("{} \r\n")
-            parts = [p for p in raw.split(",") if p.strip() != ""]
-            if not parts:
-                raise ValueError(f"Sin datos numéricos en {cmd}: {raw!r}")
-            return np.array([float(s) for s in parts], dtype=float)
+        if wpos_after != wpos:
+            raise RuntimeError("Write pointer moved while reading; frame discarded")
+        if len(ring1) != RING_SIZE or len(ring2) != RING_SIZE:
+            raise ValueError(f"Unexpected ring length: {len(ring1)}, {len(ring2)}")
 
-        def _read_channel_bin(cmd):
-            self.rp.tx_txt(cmd)
-            raw = self.rp.rx_arb()
-            if not raw:
-                raise ValueError(f"Respuesta vacía para {cmd}")
-            # asegurar múltiplo de 4 bytes
-            n = (len(raw) // 4) * 4
-            buff = [
-                struct.unpack("!f", bytearray(raw[i:i+4]))[0]
-                for i in range(0, n, 4)
-            ]
-            if not buff:
-                raise ValueError(f"Sin datos numéricos en {cmd}: {raw!r}")
-            return np.array(buff, dtype=float)
+        # 5. Unroll: oldest sample first (= the trigger sample, since DLY = 8192)
+        y = (np.roll(ring1, -(wpos + 1)), np.roll(ring2, -(wpos + 1)))
 
-        if data_format.lower() == "ascii":
-            y1 = _read_channel_ascii("ACQ:SOUR1:DATA?")
-            y2 = _read_channel_ascii("ACQ:SOUR2:DATA?")
-        elif data_format.lower() == "bin":
-            y1 = _read_channel_bin("ACQ:SOUR1:DATA?")
-            y2 = _read_channel_bin("ACQ:SOUR2:DATA?")
-        else:
-            raise ValueError(f"Formato desconocido: {data_format}")
+        # 6. Window around the trigger
+        pre = post = self.window // 2
+        max_delay = (RING_SIZE - self.window) // 2
+        delay = int(np.clip(center, -max_delay, max_delay))
+        self.last_triggered = True
 
-        return y1, y2
+        if sw is not None:                                   # CHx_PE / CHx_NE in software
+            ch, rising = sw
+            lo = max(pre - delay, 1)
+            hi = RING_SIZE - post - delay
+            idx = self._find_edge(y[ch], float(trigger_level), rising, lo, hi)
+            if idx is None:
+                self.last_triggered = False                  # auto mode: free-run, centred
+                idx = RING_SIZE // 2
+        elif hw_source == 'NOW':                             # NOW / DISABLED: free-run, centred
+            idx = RING_SIZE // 2
+        else:                                                # EXT_* / AWG_*: trigger is sample 0
+            idx = 0
 
-        # y1_post = y1[8192:]
-        # y2_post = y2[8192:]
-        # return y1_post, y2_post
+        return (self._window(y[0], idx, pre, post, delay),
+                self._window(y[1], idx, pre, post, delay))
 
     def acq_setDecimation(self, value: int):
         self.rp.tx_txt(f"ACQ:DEC {value}")

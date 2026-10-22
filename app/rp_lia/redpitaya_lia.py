@@ -22,9 +22,9 @@ class RedPitayaLIA:
     REG_PERIOD = 0x28
 
     MIN_K = 0
-    MAX_K = 20
+    MAX_K = 25
     MIN_STAGES = 1
-    MAX_STAGES = 4
+    MAX_STAGES = 10
     MIN_NOISE = 0
     MAX_NOISE = 15
     MIN_ZC_THRESH = -8192

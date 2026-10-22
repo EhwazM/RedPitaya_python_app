@@ -153,7 +153,13 @@ class Oscilloscope(QMainWindow):
 
         self.baud_rate_spin = QSpinBox()
         self.baud_rate_spin.setRange(0, int(1e7))
-        self.baud_rate_spin.setValue(self.rp_plot.sr_data.sr.baudrate)  # type: ignore
+        # sr_data.sr is None whenever the serial port failed to open
+        # (e.g. no /dev/ttyUSB0 device present) -- fall back to the
+        # configured default rather than crashing the whole window.
+        if self.rp_plot.sr_data.sr is not None:
+            self.baud_rate_spin.setValue(self.rp_plot.sr_data.sr.baudrate)
+        else:
+            self.baud_rate_spin.setValue(self.default_baudrate)
         self.baud_rate_spin.valueChanged.connect(self.rp_plot.sr_data.update_baud_rate)
 
         self.roll_over_spin = QSpinBox()

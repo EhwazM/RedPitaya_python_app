@@ -1,10 +1,11 @@
 from __future__ import annotations
 import csv
+import re
 import sys
 import time
 import numpy as np
 from PySide6.QtCore import QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QAction, QPixmap
+from PySide6.QtGui import QAction, QPixmap, QValidator
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -27,6 +28,47 @@ from PySide6.QtWidgets import (
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from assets.dark_theme import pyside6_simple_dark_theme
 from app.rp_lia.redpitaya_lia import RedPitayaLIA
+from app.ui_pyside.calibration_tool import CalibrationDialog
+
+
+class ScientificDoubleSpinBox(QDoubleSpinBox):
+    """Spin box that shows and accepts scientific notation (e.g. 1.220703e-04).
+
+    B2V is typically ~1e-4 V per count, which a fixed-decimals
+    QDoubleSpinBox cannot show with useful precision. Stepping is
+    multiplicative (1 % per step) because an additive step makes no sense
+    for a quantity that can span several orders of magnitude.
+    """
+
+    _COMPLETE = re.compile(r"^(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")
+    _PARTIAL = re.compile(r"^(\d*\.?\d*)([eE][+-]?\d*)?$")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDecimals(15)  # internal precision; display is set by textFromValue
+        self.setRange(1e-12, 1e3)
+        self.setKeyboardTracking(False)  # emit valueChanged on Enter / focus-out only
+
+    def textFromValue(self, value: float) -> str:
+        return f"{value:.6e}"
+
+    def valueFromText(self, text: str) -> float:
+        try:
+            return float(text.strip())
+        except ValueError:
+            return self.value()
+
+    def validate(self, text: str, pos: int):
+        stripped = text.strip()
+        if self._COMPLETE.match(stripped):
+            return (QValidator.State.Acceptable, text, pos)
+        if self._PARTIAL.match(stripped):  # "", "1e", "1e-", "." ... still being typed
+            return (QValidator.State.Intermediate, text, pos)
+        return (QValidator.State.Invalid, text, pos)
+
+    def stepBy(self, steps: int) -> None:
+        self.setValue(self.value() * (1.01 ** steps))
+
 
 class LockInAmp(QMainWindow):
     """
@@ -56,7 +98,7 @@ class LockInAmp(QMainWindow):
         self.n_stages = 2
         self.noise = 0
         self.ext_ref = False
-        self.zc_threshold = 0
+        self.zc_threshold = 200
         self._quit_app_on_close = False
         self.record_start_time = time.time()
         self.recorded_data: dict[str, list[float]] = {
@@ -73,10 +115,16 @@ class LockInAmp(QMainWindow):
         self.iq_timer = QTimer(self)
         self.iq_timer.timeout.connect(self.poll_iq)
         self.plot_url = plot_url
+        self._calibration_dialog = None
+        # Volts (peak) per count of I/Q/R. Starts at the nominal value
+        # (full-scale voltage / 8192) until calibrated or set manually.
+        self.b2v: float = RedPitayaLIA.volts_per_count
+        self.b2v_locked = False
+        self._last_reading: tuple[float, float, float, float] | None = None
         self.init_ui()
         self.create_menu_bar()
         self.connect_redpitaya()
-
+        
     def connect_redpitaya(self) -> None:
         try:
             self.lia.connect()
@@ -97,6 +145,9 @@ class LockInAmp(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.iq_timer.stop()
+
+        if self._calibration_dialog is not None: self._calibration_dialog.close()
+
         if self.lia.connected:
             try:
                 self.lia.soft_reset()
@@ -104,6 +155,7 @@ class LockInAmp(QMainWindow):
                 pass
             self.lia.disconnect()
         event.accept()
+
         if self._quit_app_on_close:
             QApplication.instance().quit()
         else:
@@ -260,6 +312,28 @@ class LockInAmp(QMainWindow):
         for label in (self.i_volts_label, self.q_volts_label, self.r_volts_label, self.phase_volts_label):
             label.setStyleSheet("font-family: monospace;font-size: 13px;")
             volts_layout.addWidget(label)
+
+        volts_layout.addSpacing(6)
+        volts_layout.addWidget(QLabel("B2V (V per count):"))
+        b2v_row = QHBoxLayout()
+        self.b2v_spinbox = ScientificDoubleSpinBox()
+        self.b2v_spinbox.setValue(self.b2v)
+        self.b2v_spinbox.setToolTip(
+            "Conversion constant from raw counts to volts (peak) for I, Q and R.\n"
+            "It is set and locked automatically by the Calibration tool."
+        )
+        self.b2v_spinbox.valueChanged.connect(self.on_b2v_spin_changed)
+        self.b2v_unlock_button = QPushButton("Unlock")
+        self.b2v_unlock_button.setEnabled(False)  # only meaningful while locked
+        self.b2v_unlock_button.setToolTip("Allow manual editing of the calibrated B2V")
+        self.b2v_unlock_button.clicked.connect(self.on_unlock_b2v)
+        b2v_row.addWidget(self.b2v_spinbox, 1)
+        b2v_row.addWidget(self.b2v_unlock_button)
+        volts_layout.addLayout(b2v_row)
+        self.b2v_source_label = QLabel("Source: nominal default")
+        self.b2v_source_label.setStyleSheet("font-size: 11px; font-style: italic;")
+        volts_layout.addWidget(self.b2v_source_label)
+
         volts_layout.addStretch(1)
         self.readings_tabs.addTab(volts_tab, "Voltage")
         layout.addWidget(self.readings_tabs)
@@ -289,8 +363,11 @@ class LockInAmp(QMainWindow):
         self.clear_plot_button.clicked.connect(self.on_clear_plot)
         self.save_csv_button = QPushButton("Save CSV")
         self.save_csv_button.clicked.connect(self.on_save_csv)
+        self.calibration_button = QPushButton("Calibration")
+        self.calibration_button.clicked.connect(self.on_open_calibration)
         layout.addWidget(self.clear_plot_button)
         layout.addWidget(self.save_csv_button)
+        layout.addWidget(self.calibration_button)
         return group
 
     # ------------------------------------------------------------------
@@ -467,15 +544,21 @@ class LockInAmp(QMainWindow):
         self.q_value_label.setText(f"Q: {q_value:.2f}")
         self.r_value_label.setText(f"R: {r_value:.2f}")
         self.phase_value_label.setText(f"Phase: {np.degrees(phase_value):.2f}°")
-        try:
-            i_volts = self.lia.raw_to_volts(i_value)
-            q_volts = self.lia.raw_to_volts(q_value)
-            r_volts = self.lia.raw_to_volts(r_value)
-        except RuntimeError:
+        self._last_reading = (i_value, q_value, r_value, phase_value)
+        self._refresh_volts_labels()
+
+    def _refresh_volts_labels(self) -> None:
+        """Convert the last I/Q/R reading to volts with the current B2V.
+
+        Also called when B2V changes, so the Voltage tab updates
+        immediately even if live polling is off.
+        """
+        if self._last_reading is None:
             return
-        self.i_volts_label.setText(f"I: {i_volts:.4f} V")
-        self.q_volts_label.setText(f"Q: {q_volts:.4f} V")
-        self.r_volts_label.setText(f"R: {r_volts:.4f} V")
+        i_value, q_value, r_value, phase_value = self._last_reading
+        self.i_volts_label.setText(f"I: {i_value * self.b2v:.4f} V")
+        self.q_volts_label.setText(f"Q: {q_value * self.b2v:.4f} V")
+        self.r_volts_label.setText(f"R: {r_value * self.b2v:.4f} V")
         self.phase_volts_label.setText(f"Phase: {np.degrees(phase_value):.2f}°")
 
     # ------------------------------------------------------------------
@@ -519,6 +602,65 @@ class LockInAmp(QMainWindow):
     # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
+    
+    def on_open_calibration(self) -> None:
+        if self._calibration_dialog is None:
+            self._calibration_dialog = CalibrationDialog(self.lia, parent=self)
+            self._calibration_dialog.b2v_calculated.connect(
+                self._on_b2v_calculated
+            )
+        self._calibration_dialog.show()
+        self._calibration_dialog.raise_()
+        self._calibration_dialog.activateWindow()
+
+    # ------------------------------------------------------------------
+    # B2V (counts -> volts) handling
+    # ------------------------------------------------------------------
+
+    def _apply_b2v(self, value: float) -> None:
+        """Single place that changes the active B2V."""
+        self.b2v = float(value)
+        # Keep the client's own conversion helpers consistent with the GUI.
+        RedPitayaLIA.volts_per_count = self.b2v
+        self._refresh_volts_labels()
+
+    def _set_b2v_locked(self, locked: bool) -> None:
+        self.b2v_locked = locked
+        self.b2v_spinbox.setEnabled(not locked)
+        self.b2v_unlock_button.setEnabled(locked)
+
+    def _on_b2v_calculated(self, b2v: float) -> None:
+        """Calibration finished: use its B2V and lock the manual control."""
+        self.b2v_spinbox.blockSignals(True)  # don't treat this as a manual edit
+        self.b2v_spinbox.setValue(b2v)
+        self.b2v_spinbox.blockSignals(False)
+        self._apply_b2v(b2v)  # use the exact value, not the spinbox-rounded one
+        self._set_b2v_locked(True)
+        self.b2v_source_label.setText("Source: calibration (locked)")
+        self.statusBar().showMessage(f"B2V = {b2v:.6e} V per count (from calibration)")
+
+    def on_b2v_spin_changed(self, value: float) -> None:
+        """Manual edit of the B2V spinbox (only reachable while unlocked)."""
+        self._apply_b2v(value)
+        self.b2v_source_label.setText("Source: manual")
+        self.statusBar().showMessage(f"B2V set manually: {value:.6e} V per count")
+
+    def on_unlock_b2v(self) -> None:
+        reply = QMessageBox.warning(
+            self,
+            "Change calibrated B2V?",
+            "The B2V constant was set by the calibration tool.\n\n"
+            "Editing it manually will override the calibrated value and the "
+            "Voltage readings will no longer reflect your calibration.\n\n"
+            "Do you want to unlock it for manual editing?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._set_b2v_locked(False)
+        self.b2v_source_label.setText("Source: calibration (unlocked, editable)")
+        self.statusBar().showMessage("B2V unlocked for manual editing")
 
     def on_clear_plot(self) -> None:
         """Clear recorded I/Q history and the live plot, in place.
@@ -624,6 +766,7 @@ class LockInAmp(QMainWindow):
                 "Error",
                 f"Failed to save file:\n{exc}",
             )
+    
 
 # ======================================================================
 # Main
