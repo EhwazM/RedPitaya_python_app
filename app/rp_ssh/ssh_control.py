@@ -130,7 +130,11 @@ class RedPitayaSSH:
         return exit_status, out, err
 
     def _exec_once(self, command_line: str) -> tuple[int, str, str]:
-        _stdin, stdout, stderr = self._client.exec_command(
+        client = self._client
+        if client is None:
+            raise RedPitayaSSHError("Not connected")
+
+        _stdin, stdout, stderr = client.exec_command(
             command_line,
             timeout=self.timeout,
         )
@@ -160,11 +164,17 @@ class RedPitayaSSH:
             "> /dev/null 2>&1 < /dev/null & disown"
         )
         try:
-            self._client.exec_command(detached, timeout=self.timeout)
+            client = self._client
+            if client is None:
+                raise RedPitayaSSHError("Not connected")
+            client.exec_command(detached, timeout=self.timeout)
         except (paramiko.SSHException, OSError, EOFError):
             self.disconnect()
             self.connect()
-            self._client.exec_command(detached, timeout=self.timeout)
+            client = self._client
+            if client is None:
+                raise RedPitayaSSHError("Not connected")
+            client.exec_command(detached, timeout=self.timeout)
 
     # ------------------------------------------------------------------ #
     # High level operations

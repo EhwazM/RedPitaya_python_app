@@ -209,8 +209,8 @@ class CalibrationDialog(QDialog):
 
         self.settle_spin = QDoubleSpinBox()
         self.settle_spin.setDecimals(1)
-        self.settle_spin.setRange(0.0, 60.0)
-        self.settle_spin.setValue(2.0)
+        self.settle_spin.setRange(0.0, 600.0)
+        self.settle_spin.setValue(10.0)
         self.settle_spin.setSuffix(" s")
         self.settle_spin.setToolTip(
             "Wait before sampling so the IIR filters can settle. Stronger "

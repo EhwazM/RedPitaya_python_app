@@ -1,24 +1,29 @@
 from __future__ import annotations
 import csv
+import math
 import re
 import sys
 import time
+from collections import deque
 import numpy as np
 from PySide6.QtCore import QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QPixmap, QValidator
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -27,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from assets.dark_theme import pyside6_simple_dark_theme
+from app.paths import resource_path
 from app.rp_lia.redpitaya_lia import RedPitayaLIA
 from app.ui_pyside.calibration_tool import CalibrationDialog
 
@@ -70,6 +76,169 @@ class ScientificDoubleSpinBox(QDoubleSpinBox):
         self.setValue(self.value() * (1.01 ** steps))
 
 
+def make_selectable(*labels: QLabel) -> None:
+    """Let the user select text with the mouse (then Ctrl+C or right-click > Copy)."""
+    for label in labels:
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+
+def set_label_text(label: QLabel, text: str) -> None:
+    """setText that does not wipe a selection the user is in the middle of
+    copying: while text is selected the label keeps its content, and it
+    resumes updating as soon as the selection is cleared (click elsewhere)."""
+    if label.hasSelectedText():
+        return
+    label.setText(text)
+
+
+# Fixed width (px) of the left sidebar, so it never resizes as readings change.
+# Raise it if any control looks cramped.
+SIDEBAR_WIDTH = 400
+
+# --- Display precision -------------------------------------------------------
+# With a heavy filter (e.g. K=31, 8 stages) the readings are stable to many more
+# digits than before, so show plenty. Raise/lower these to taste.
+COUNT_DECIMALS = 6      # decimals in the Counts tab I / Q / R readout and stats means
+PHASE_DECIMALS = 6      # decimals (degrees) in the phase readout and phase mean
+VOLT_DECIMALS = 10      # decimals in the Voltage tab I / Q / R readout (V)
+STATS_SIG = 6           # significant digits for Std and Std % (they get tiny when filtered)
+STATS_VOLT_MEAN_SIG = 9  # significant digits for the voltage mean
+STATS_VOLT_SIG = STATS_SIG  # significant digits for the voltage Std
+
+
+def format_volts(value: float | None, sig: int = STATS_VOLT_SIG) -> str:
+    """Volts with an automatic V / mV / uV / nV prefix and ~`sig` significant
+    digits, so tiny standard deviations stay readable and compact."""
+    if value is None:
+        return "\u2014"
+    magnitude = abs(value)
+    if magnitude == 0:
+        return "0 V"
+    for scale, unit in ((1.0, "V"), (1e3, "mV"), (1e6, "\u00b5V"), (1e9, "nV")):
+        if magnitude * scale >= 1 or unit == "nV":
+            break
+    scaled = value * scale
+    integer_digits = len(str(int(abs(scaled)))) if abs(scaled) >= 1 else 1
+    decimals = max(sig - integer_digits, 0)
+    return f"{scaled:.{decimals}f} {unit}"
+
+
+def format_sig(value: float | None, sig: int = STATS_SIG, suffix: str = "") -> str:
+    """`value` with `sig` significant digits, however small it is.
+
+    Fixed decimals would print a tiny standard deviation (say 0.00042) as
+    0.00, so the number of decimals follows the magnitude instead. Very
+    small / very large values fall back to scientific notation.
+    """
+    if value is None:
+        return "\u2014"
+    if value == 0:
+        return f"0{suffix}"
+    magnitude = math.floor(math.log10(abs(value)))
+    if magnitude < -6 or magnitude >= 9:
+        return f"{value:.{sig - 1}e}{suffix}"
+    decimals = max(sig - 1 - magnitude, 0)
+    return f"{value:.{decimals}f}{suffix}"
+
+
+def compute_stats(samples: np.ndarray, circular: bool = False) -> tuple[float, float | None]:
+    """Mean and sample standard deviation (ddof=1) of `samples`.
+
+    With circular=True the samples are angles in radians and the circular
+    mean / deviation are used, so a phase hovering around +/-180 deg does
+    not produce a bogus huge spread. Returns std=None for fewer than 2
+    samples.
+    """
+    n = len(samples)
+    if circular:
+        mean = float(np.arctan2(np.mean(np.sin(samples)), np.mean(np.cos(samples))))
+        deviations = (samples - mean + np.pi) % (2 * np.pi) - np.pi
+        std = float(np.sqrt(np.sum(deviations ** 2) / (n - 1))) if n > 1 else None
+    else:
+        mean = float(np.mean(samples))
+        std = float(np.std(samples, ddof=1)) if n > 1 else None
+    return mean, std
+
+
+class StatsPanel(QWidget):
+    """Small grid: one row per channel, columns Mean / Std / Std %."""
+
+    ROWS = ("I", "Q", "R", "Phase")
+    HEADERS = ("", "Mean", "Std", "Std %")
+    _STYLE = "font-family: monospace;font-size: 11px;"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
+
+        for col, text in enumerate(self.HEADERS):
+            header = QLabel(text)
+            header.setStyleSheet(self._STYLE + "font-weight: bold;")
+            header.setAlignment(Qt.AlignmentFlag.AlignRight if col else Qt.AlignmentFlag.AlignLeft)
+            grid.addWidget(header, 0, col)
+
+        self._cells: dict[str, list[QLabel]] = {}
+        for row, name in enumerate(self.ROWS, start=1):
+            name_label = QLabel(name)
+            name_label.setStyleSheet(self._STYLE)
+            grid.addWidget(name_label, row, 0)
+            cells = []
+            for col in range(1, 4):
+                cell = QLabel("\u2014")
+                cell.setStyleSheet(self._STYLE)
+                cell.setAlignment(Qt.AlignmentFlag.AlignRight)
+                grid.addWidget(cell, row, col)
+                make_selectable(cell)
+                cells.append(cell)
+            self._cells[name] = cells
+
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(3, 1)
+
+        self.n_label = QLabel("n = 0")
+        self.n_label.setStyleSheet("font-size: 11px; font-style: italic;")
+        make_selectable(self.n_label)
+        grid.addWidget(self.n_label, len(self.ROWS) + 1, 0, 1, 2)
+
+        self.status_label = QLabel()
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        grid.addWidget(self.status_label, len(self.ROWS) + 1, 2, 1, 2)
+        self.set_running(True)
+
+    def set_row(self, name: str, mean: str, std: str, pct: str) -> None:
+        for cell, text in zip(self._cells[name], (mean, std, pct)):
+            set_label_text(cell, text)
+
+    def as_text(self) -> str:
+        """The table as tab-separated text (pastes cleanly into Excel / Sheets)."""
+        lines = ["\t".join(self.HEADERS)]
+        for name in self.ROWS:
+            lines.append("\t".join([name] + [cell.text() for cell in self._cells[name]]))
+        lines.append(self.n_label.text())
+        return "\n".join(lines)
+
+    def set_running(self, running: bool) -> None:
+        if running:
+            self.status_label.setText("\u25cf Running")
+            self.status_label.setStyleSheet("font-size: 11px; font-weight: bold; color: #4caf50;")
+        else:
+            self.status_label.setText("\u25cf Stopped")
+            self.status_label.setStyleSheet("font-size: 11px; font-weight: bold; color: #e05555;")
+
+    def set_count(self, n: int) -> None:
+        set_label_text(self.n_label, f"n = {n}")
+
+    def clear(self) -> None:
+        for cells in self._cells.values():
+            for cell in cells:
+                set_label_text(cell, "\u2014")
+        self.set_count(0)
+
+
 class LockInAmp(QMainWindow):
     """
 
@@ -96,10 +265,9 @@ class LockInAmp(QMainWindow):
         self.phase_offset = 0.0
         self.k_value = 17
         self.n_stages = 2
-        self.noise = 0
         self.ext_ref = False
         self.zc_threshold = 200
-        self._quit_app_on_close = False
+        self._quit_app_on_close = True
         self.record_start_time = time.time()
         self.recorded_data: dict[str, list[float]] = {
             "time": [],
@@ -121,6 +289,14 @@ class LockInAmp(QMainWindow):
         self.b2v: float = RedPitayaLIA.volts_per_count
         self.b2v_locked = False
         self._last_reading: tuple[float, float, float, float] | None = None
+        # Rolling buffers (raw counts; phase in rad) the statistics are
+        # computed over. Voltage stats are derived from the counts buffers
+        # with the *current* B2V, so they follow B2V changes immediately.
+        self.stats_window = 100
+        self.stats_running = True  # False = statistics frozen (Stop)
+        self._stat_buffers: dict[str, deque] = {
+            key: deque(maxlen=self.stats_window) for key in ("I", "Q", "R", "phase")
+        }
         self.init_ui()
         self.create_menu_bar()
         self.connect_redpitaya()
@@ -133,7 +309,6 @@ class LockInAmp(QMainWindow):
                 phase_offset_rad=self.phase_offset,
                 k=self.k_value,
                 n_stages=self.n_stages,
-                noise=self.noise,
                 ext_ref=self.ext_ref,
                 zc_threshold=self.zc_threshold,
             )
@@ -157,7 +332,9 @@ class LockInAmp(QMainWindow):
         event.accept()
 
         if self._quit_app_on_close:
-            QApplication.instance().quit()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
         else:
             self.back_to_menu.emit()
 
@@ -197,8 +374,14 @@ class LockInAmp(QMainWindow):
         sidebar.addLayout(self.build_logo_row())
         sidebar_widget = QWidget()
         sidebar_widget.setLayout(sidebar)
-        sidebar_widget.setMinimumWidth(280)
-        sidebar_widget.setMaximumWidth(350)
+        # Scrollable, so adding content (e.g. the statistics) never makes Qt
+        # squeeze/overlap widgets when the window is shorter than the sidebar.
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidget(sidebar_widget)
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sidebar_scroll.setFixedWidth(SIDEBAR_WIDTH)
         # ------------------------------------------------------------------
         # Plot area
         # ------------------------------------------------------------------
@@ -221,7 +404,7 @@ class LockInAmp(QMainWindow):
         )
         self.browser.setUrl(QUrl(self.plot_url))
         plot_layout.addWidget(self.browser, 1)
-        main_layout.addWidget(sidebar_widget, stretch=0)
+        main_layout.addWidget(sidebar_scroll, stretch=0)
         main_layout.addWidget(plot_container, stretch=1)
         self.setCentralWidget(central)
 
@@ -254,10 +437,7 @@ class LockInAmp(QMainWindow):
         self.stages_spinbox.setRange(RedPitayaLIA.MIN_STAGES, RedPitayaLIA.MAX_STAGES)
         self.stages_spinbox.setValue(self.n_stages)
         self.stages_spinbox.valueChanged.connect(self.on_iir_stages_changed)
-        self.noise_spinbox = QSpinBox()
-        self.noise_spinbox.setRange(RedPitayaLIA.MIN_NOISE, RedPitayaLIA.MAX_NOISE)
-        self.noise_spinbox.setValue(self.noise)
-        self.noise_spinbox.valueChanged.connect(self.on_noise_changed)
+
         # External reference (IN2)
         self.ext_ref_checkbox = QCheckBox(
             "Use IN2 as external reference"
@@ -270,18 +450,28 @@ class LockInAmp(QMainWindow):
         self.zc_threshold_spinbox.setSingleStep(1)
         self.zc_threshold_spinbox.valueChanged.connect(self.on_zc_threshold_changed)
         self.in2_period_label = QLabel("IN2 Period: 0 cycles")
-        self.in2_frequency_label = QLabel("IN2 Frequency: 0.00 Hz")
+        self.in2_frequency_label = QLabel("Frequency: 0.00 Hz")
         for label in (self.in2_period_label, self.in2_frequency_label):
-            label.setStyleSheet("font-family: monospace;font-size: 12px;")
+            label.setStyleSheet("font-family: monospace;font-size: 11px;")
+            make_selectable(label)
         form.addRow(self.ext_ref_checkbox)
         form.addRow(QLabel('ZC Threshold:'), self.zc_threshold_spinbox)
-        form.addRow(self.in2_period_label)
-        form.addRow(self.in2_frequency_label)
+        in2_row = QHBoxLayout()
+        in2_row.addWidget(self.in2_period_label)
+        in2_row.addStretch(1)
+        in2_row.addWidget(self.in2_frequency_label)
+        form.addRow(in2_row)
         form.addRow(QLabel('Frequency:'), self.frequency_spinbox)
         form.addRow(QLabel('Phase Offset:'), self.phase_offset_spinbox)
-        form.addRow(QLabel('K:'), self.k_spinbox)
-        form.addRow(QLabel('IIR Stages:'), self.stages_spinbox)
-        form.addRow(QLabel('Noise:'), self.noise_spinbox)
+        # Filter parameters side by side
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel('K:'))
+        filter_row.addWidget(self.k_spinbox, 1)
+        filter_row.addSpacing(8)
+        filter_row.addWidget(QLabel('IIR Stages:'))
+        filter_row.addWidget(self.stages_spinbox, 1)
+        form.addRow(filter_row)
+
         return group
 
     # ------------------------------------------------------------------
@@ -300,22 +490,33 @@ class LockInAmp(QMainWindow):
         self.phase_value_label = QLabel("Phase: 0.00°")
         for label in (self.i_value_label, self.q_value_label, self.r_value_label, self.phase_value_label):
             label.setStyleSheet("font-family: monospace;font-size: 13px;")
+            make_selectable(label)
             counts_layout.addWidget(label)
-        counts_layout.addStretch(1)
-        self.readings_tabs.addTab(counts_tab, "Counts")
+        counts_layout.addSpacing(6)
+        counts_layout.addWidget(self._build_stats_title())
+        self.counts_stats = StatsPanel()
+        counts_layout.addWidget(self.counts_stats)
         volts_tab = QWidget()
         volts_layout = QVBoxLayout(volts_tab)
-        self.i_volts_label = QLabel("I: 0.0000 V")
-        self.q_volts_label = QLabel("Q: 0.0000 V")
-        self.r_volts_label = QLabel("R: 0.0000 V")
+        self.i_volts_label = QLabel(f"I: {0:.{VOLT_DECIMALS}f} V")
+        self.q_volts_label = QLabel(f"Q: {0:.{VOLT_DECIMALS}f} V")
+        self.r_volts_label = QLabel(f"R: {0:.{VOLT_DECIMALS}f} V")
         self.phase_volts_label = QLabel("Phase: 0.00°")
         for label in (self.i_volts_label, self.q_volts_label, self.r_volts_label, self.phase_volts_label):
             label.setStyleSheet("font-family: monospace;font-size: 13px;")
+            make_selectable(label)
             volts_layout.addWidget(label)
 
         volts_layout.addSpacing(6)
-        volts_layout.addWidget(QLabel("B2V (V per count):"))
+        volts_layout.addWidget(self._build_stats_title())
+        self.volts_stats = StatsPanel()
+        volts_layout.addWidget(self.volts_stats)
+
+        volts_layout.addSpacing(6)
         b2v_row = QHBoxLayout()
+        b2v_label = QLabel("B2V:")
+        b2v_label.setToolTip("Volts (peak) per count")
+        b2v_row.addWidget(b2v_label)
         self.b2v_spinbox = ScientificDoubleSpinBox()
         self.b2v_spinbox.setValue(self.b2v)
         self.b2v_spinbox.setToolTip(
@@ -324,6 +525,8 @@ class LockInAmp(QMainWindow):
         )
         self.b2v_spinbox.valueChanged.connect(self.on_b2v_spin_changed)
         self.b2v_unlock_button = QPushButton("Unlock")
+        self.b2v_unlock_button.setMinimumWidth(84)
+        self.b2v_unlock_button.setMinimumHeight(28)
         self.b2v_unlock_button.setEnabled(False)  # only meaningful while locked
         self.b2v_unlock_button.setToolTip("Allow manual editing of the calibrated B2V")
         self.b2v_unlock_button.clicked.connect(self.on_unlock_b2v)
@@ -333,10 +536,67 @@ class LockInAmp(QMainWindow):
         self.b2v_source_label = QLabel("Source: nominal default")
         self.b2v_source_label.setStyleSheet("font-size: 11px; font-style: italic;")
         volts_layout.addWidget(self.b2v_source_label)
-
         volts_layout.addStretch(1)
+
         self.readings_tabs.addTab(volts_tab, "Voltage")
+        self.readings_tabs.addTab(counts_tab, "Counts")
+
         layout.addWidget(self.readings_tabs)
+        run_stop_row = QHBoxLayout()
+        self.stats_run_button = QPushButton("\u25b6 Run")
+        self.stats_stop_button = QPushButton("\u25a0 Stop")
+        for button, colour, hover in (
+            (self.stats_run_button, "#2e7d32", "#4caf50"),
+            (self.stats_stop_button, "#c62828", "#e05555"),
+        ):
+            button.setCheckable(True)
+            button.setMinimumHeight(28)
+            button.setStyleSheet(
+                f"QPushButton {{ border: 1px solid {colour}; border-radius: 4px;"
+                f" padding: 3px 10px; color: {hover}; }}"
+                f"QPushButton:checked {{ background-color: {colour};"
+                f" color: white; font-weight: bold; }}"
+            )
+        self.stats_run_button.setChecked(True)
+        self.stats_run_button.setToolTip("Resume updating the statistics")
+        self.stats_stop_button.setToolTip(
+            "Freeze the statistics so the values can be written down\n"
+            "(the live I/Q/R readout and the recording keep going)"
+        )
+        self.stats_run_group = QButtonGroup(self)
+        self.stats_run_group.setExclusive(True)
+        self.stats_run_group.addButton(self.stats_run_button)
+        self.stats_run_group.addButton(self.stats_stop_button)
+        self.stats_run_button.clicked.connect(lambda: self.on_stats_running_changed(True))
+        self.stats_stop_button.clicked.connect(lambda: self.on_stats_running_changed(False))
+        self.stats_reset_button = QPushButton("Reset")
+        self.stats_reset_button.setMinimumHeight(28)
+        self.stats_reset_button.setToolTip("Discard the samples used for the statistics")
+        self.stats_reset_button.clicked.connect(self.reset_stats)
+        run_stop_row.addWidget(self.stats_run_button, 1)
+        run_stop_row.addWidget(self.stats_stop_button, 1)
+        run_stop_row.addWidget(self.stats_reset_button, 1)
+        self.stats_copy_button = QPushButton("Copy")
+        self.stats_copy_button.setMinimumHeight(28)
+        self.stats_copy_button.setToolTip(
+            "Copy the statistics table of the current tab to the clipboard\n"
+            "(tab-separated, pastes into Excel / Sheets)"
+        )
+        self.stats_copy_button.clicked.connect(self.on_copy_stats)
+        run_stop_row.addWidget(self.stats_copy_button, 1)
+        layout.addLayout(run_stop_row)
+        stats_row = QHBoxLayout()
+        stats_row.addWidget(QLabel("Stats window:"))
+        self.stats_window_spinbox = QSpinBox()
+        self.stats_window_spinbox.setRange(2, 100000)
+        self.stats_window_spinbox.setValue(self.stats_window)
+        self.stats_window_spinbox.setSuffix(" samples")
+        self.stats_window_spinbox.setToolTip(
+            "Mean / Std are computed over the most recent N readings."
+        )
+        self.stats_window_spinbox.valueChanged.connect(self.on_stats_window_changed)
+        stats_row.addWidget(self.stats_window_spinbox, 1)
+        layout.addLayout(stats_row)
         poll_row = QHBoxLayout()
         self.iq_poll_checkbox = QCheckBox("Live update")
         self.iq_poll_checkbox.setChecked(True)
@@ -351,6 +611,96 @@ class LockInAmp(QMainWindow):
         poll_row.addWidget(self.iq_poll_interval_spinbox)
         layout.addLayout(poll_row)
         return group
+
+    def _build_stats_title(self) -> QLabel:
+        title = QLabel("Statistics")
+        title.setStyleSheet("font-size: 12px;font-weight: bold;")
+        title.setToolTip(
+            "Std is the sample standard deviation (n-1).\n"
+            "Std % = Std / |Mean| x 100 for I, Q and R (shown as \u2014 if the mean is 0).\n"
+            "Phase is averaged circularly; its Std % is relative to 360\u00b0."
+        )
+        return title
+
+    # ------------------------------------------------------------------
+    # Statistics
+    # ------------------------------------------------------------------
+
+    def on_stats_window_changed(self, n: int) -> None:
+        self.stats_window = int(n)
+        # Re-create the deques with the new maxlen, keeping the newest samples.
+        for key, buf in self._stat_buffers.items():
+            self._stat_buffers[key] = deque(buf, maxlen=self.stats_window)
+        self._refresh_stats()
+
+    def on_stats_running_changed(self, running: bool) -> None:
+        """Run = keep adding readings to the statistics; Stop = freeze them."""
+        self.stats_running = running
+        self.counts_stats.set_running(running)
+        self.volts_stats.set_running(running)
+        self.statusBar().showMessage(
+            "Statistics running" if running else "Statistics stopped (frozen)"
+        )
+
+    def on_copy_stats(self) -> None:
+        panel = self.counts_stats if self.readings_tabs.currentIndex() == 0 else self.volts_stats
+        QApplication.clipboard().setText(panel.as_text())
+        self.statusBar().showMessage("Statistics copied to the clipboard", 3000)
+
+    def reset_stats(self) -> None:
+        for buf in self._stat_buffers.values():
+            buf.clear()
+        self._refresh_stats()
+
+    def _refresh_stats(self) -> None:
+        """Recompute Mean / Std / Std % for the Counts and Voltage tabs."""
+        n = len(self._stat_buffers["I"])
+        if n == 0:
+            self.counts_stats.clear()
+            self.volts_stats.clear()
+            return
+
+        def pct_of_mean(mean: float, std: float | None) -> float | None:
+            if std is None or mean == 0:
+                return None
+            return std / abs(mean) * 100.0
+
+        def fmt(value: float | None, decimals: int, suffix: str = "") -> str:
+            return "\u2014" if value is None else f"{value:.{decimals}f}{suffix}"
+
+        for key, name in (("I", "I"), ("Q", "Q"), ("R", "R")):
+            samples = np.fromiter(self._stat_buffers[key], dtype=float, count=n)
+            mean, std = compute_stats(samples)
+            pct = pct_of_mean(mean, std)
+            pct_text = format_sig(pct, 4, " %")
+
+            self.counts_stats.set_row(
+                name, fmt(mean, COUNT_DECIMALS), format_sig(std, STATS_SIG), pct_text
+            )
+
+            # Same relative spread in volts; absolute values scale by B2V.
+            self.volts_stats.set_row(
+                name,
+                format_volts(mean * self.b2v, STATS_VOLT_MEAN_SIG),
+                format_volts(None if std is None else std * self.b2v, STATS_VOLT_SIG),
+                pct_text,
+            )
+
+        phase = np.fromiter(self._stat_buffers["phase"], dtype=float, count=n)
+        mean_rad, std_rad = compute_stats(phase, circular=True)
+        mean_deg = float(np.degrees(mean_rad))
+        std_deg = None if std_rad is None else float(np.degrees(std_rad))
+        phase_pct = None if std_deg is None else std_deg / 360.0 * 100.0
+        for panel in (self.counts_stats, self.volts_stats):
+            panel.set_row(
+                "Phase",
+                fmt(mean_deg, PHASE_DECIMALS, "\u00b0"),
+                format_sig(std_deg, STATS_SIG, "\u00b0"),
+                format_sig(phase_pct, 4, " %"),
+            )
+
+        self.counts_stats.set_count(n)
+        self.volts_stats.set_count(n)
 
     # ------------------------------------------------------------------
     # Plot options
@@ -393,20 +743,20 @@ class LockInAmp(QMainWindow):
         """)
 
         logo_layout = QHBoxLayout(logo_frame)
-        logo_layout.setContentsMargins(10, 8, 10, 8)
-        logo_layout.setSpacing(8)
+        logo_layout.setContentsMargins(10, 6, 10, 6)
+        logo_layout.setSpacing(7)
 
         self.uni_logo = QLabel()
         self.uni_logo.setPixmap(
-            QPixmap('assets/ua.png').scaledToWidth(75)
+            QPixmap(resource_path('assets/ua.png')).scaledToWidth(75)
         )
-        self.uni_logo.setAlignment(Qt.AlignCenter)
+        self.uni_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.group_logo = QLabel()
         self.group_logo.setPixmap(
-            QPixmap('assets/geoel.png').scaledToWidth(100)
+            QPixmap(resource_path('assets/geoel.png')).scaledToWidth(100)
         )
-        self.group_logo.setAlignment(Qt.AlignCenter)
+        self.group_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         logo_layout.addWidget(self.uni_logo, 1)
         logo_layout.addWidget(self.group_logo, 1)
@@ -490,16 +840,6 @@ class LockInAmp(QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(f"IIR stage error: {exc}")
 
-    def on_noise_changed(self, noise: int) -> None:
-        self.noise = noise
-        if not self.lia.connected:
-            return
-        try:
-            self.lia.set_noise(noise)
-            self.statusBar().showMessage(f"Noise level: {noise}")
-        except Exception as exc:
-            self.statusBar().showMessage(f"Noise level error: {exc}")
-
     # ------------------------------------------------------------------
     # FPGA -> UI
     # ------------------------------------------------------------------
@@ -522,8 +862,8 @@ class LockInAmp(QMainWindow):
             )
             period = self.lia.get_period()
             external_frequency = self.lia.period_to_frequency(period)
-            self.in2_period_label.setText(f"IN2 Period: {period} cycles")
-            self.in2_frequency_label.setText(f"IN2 Frequency: {external_frequency:.2f} Hz")
+            set_label_text(self.in2_period_label, f"IN2 Period: {period} cycles")
+            set_label_text(self.in2_frequency_label, f"Frequency: {external_frequency:.2f} Hz")
             if self.ext_ref and period > 0:
                 self.frequency_spinbox.blockSignals(True)
                 self.frequency_spinbox.setValue(external_frequency)
@@ -540,12 +880,15 @@ class LockInAmp(QMainWindow):
     ) -> None:
         if r_value is None or phase_value is None:
             r_value, phase_value = self.lia.calculate_r_phase(i_value, q_value)
-        self.i_value_label.setText(f"I: {i_value:.2f}")
-        self.q_value_label.setText(f"Q: {q_value:.2f}")
-        self.r_value_label.setText(f"R: {r_value:.2f}")
-        self.phase_value_label.setText(f"Phase: {np.degrees(phase_value):.2f}°")
+        set_label_text(self.i_value_label, f"I: {i_value:.{COUNT_DECIMALS}f}")
+        set_label_text(self.q_value_label, f"Q: {q_value:.{COUNT_DECIMALS}f}")
+        set_label_text(self.r_value_label, f"R: {r_value:.{COUNT_DECIMALS}f}")
+        set_label_text(self.phase_value_label, f"Phase: {np.degrees(phase_value):.{PHASE_DECIMALS}f}°")
         self._last_reading = (i_value, q_value, r_value, phase_value)
-        self._refresh_volts_labels()
+        if self.stats_running:
+            for key, value in zip(("I", "Q", "R", "phase"), self._last_reading):
+                self._stat_buffers[key].append(value)
+        self._refresh_volts_labels()  # also refreshes the statistics
 
     def _refresh_volts_labels(self) -> None:
         """Convert the last I/Q/R reading to volts with the current B2V.
@@ -555,11 +898,12 @@ class LockInAmp(QMainWindow):
         """
         if self._last_reading is None:
             return
+        self._refresh_stats()
         i_value, q_value, r_value, phase_value = self._last_reading
-        self.i_volts_label.setText(f"I: {i_value * self.b2v:.4f} V")
-        self.q_volts_label.setText(f"Q: {q_value * self.b2v:.4f} V")
-        self.r_volts_label.setText(f"R: {r_value * self.b2v:.4f} V")
-        self.phase_volts_label.setText(f"Phase: {np.degrees(phase_value):.2f}°")
+        set_label_text(self.i_volts_label, f"I: {i_value * self.b2v:.{VOLT_DECIMALS}f} V")
+        set_label_text(self.q_volts_label, f"Q: {q_value * self.b2v:.{VOLT_DECIMALS}f} V")
+        set_label_text(self.r_volts_label, f"R: {r_value * self.b2v:.{VOLT_DECIMALS}f} V")
+        set_label_text(self.phase_volts_label, f"Phase: {np.degrees(phase_value):.{PHASE_DECIMALS}f}°")
 
     # ------------------------------------------------------------------
     # Live polling
@@ -686,6 +1030,7 @@ class LockInAmp(QMainWindow):
         """
         self.recorded_data = {'time': [], 'I': [], 'Q': [], 'R': [], 'phase': []}
         self.record_start_time = time.time()
+        self.reset_stats()
         js_code = """
         (function() {
             function findClearButton(root) {

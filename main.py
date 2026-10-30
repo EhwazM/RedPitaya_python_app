@@ -10,10 +10,12 @@ from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -29,10 +31,15 @@ from bokeh.server.server import Server
 from tornado.ioloop import IOLoop
 
 from assets.dark_theme import pyside6_simple_dark_theme
+from app.paths import resource_path
 from app.rp_plot.plot_setup import BokehPlot, LIABokehPlot
 from app.rp_ssh.ssh_control import RedPitayaSSH, RedPitayaSSHError
 from app.ui_pyside.lock_in_amp import LockInAmp
 from app.ui_pyside.oscilloscope import Oscilloscope
+from app.ui_pyside.saved_connections import (
+    SavedConnectionsDialog,
+    SavedConnectionsStore,
+)
 
 
 # ============================================================================
@@ -161,9 +168,9 @@ class ModeCard(QFrame):
     def __init__(self, emoji: str, title: str, description: str, on_click):
         super().__init__()
         self.setObjectName("ModeCard")
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumSize(240, 200)
-        self.setFrameShape(QFrame.NoFrame)
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self._on_click = on_click
 
         self.setStyleSheet(
@@ -186,19 +193,19 @@ class ModeCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 24, 20, 24)
         layout.setSpacing(8)
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         emoji_label = QLabel(emoji)
         emoji_label.setObjectName("CardEmoji")
-        emoji_label.setAlignment(Qt.AlignCenter)
+        emoji_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         title_label = QLabel(title)
         title_label.setObjectName("CardTitle")
-        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         desc_label = QLabel(description)
         desc_label.setObjectName("CardDesc")
-        desc_label.setAlignment(Qt.AlignCenter)
+        desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         desc_label.setWordWrap(True)
 
         layout.addWidget(emoji_label)
@@ -206,7 +213,7 @@ class ModeCard(QFrame):
         layout.addWidget(desc_label)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.pos()):
             self._on_click()
         super().mouseReleaseEvent(event)
 
@@ -292,6 +299,7 @@ class ModeSelector(QMainWindow):
         self._switch_worker = None
         self._connect_worker = None
         self.rp_ssh: RedPitayaSSH | None = None
+        self.saved_connections = SavedConnectionsStore()
 
         self.setWindowTitle("Red Pitaya Control Suite")
         self.setMinimumSize(560, 480)
@@ -302,7 +310,9 @@ class ModeSelector(QMainWindow):
         # Covers every quit path (File > Exit, the window's close button
         # with nothing else open, etc.) in one place, rather than
         # duplicating the disconnect call at each of them.
-        QApplication.instance().aboutToQuit.connect(self._cleanup_ssh)
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._cleanup_ssh)
 
     def _cleanup_ssh(self):
         if self.rp_ssh is not None:
@@ -334,13 +344,15 @@ class ModeSelector(QMainWindow):
 
         self.uni_logo = QLabel()
         self.uni_logo.setPixmap(
-            QPixmap("assets/ua.png").scaledToWidth(75)
-        )
+            QPixmap(resource_path("assets/ua.png")).scaledToWidth(
+            100, Qt.TransformationMode.SmoothTransformation
+        ))
 
         self.group_logo = QLabel()
         self.group_logo.setPixmap(
-            QPixmap("assets/geoel.png").scaledToWidth(100)
-        )
+            QPixmap(resource_path("assets/geoel.png")).scaledToWidth(
+            150, Qt.TransformationMode.SmoothTransformation
+        ))
 
         layout.addWidget(self.uni_logo)
         layout.addStretch(1)
@@ -358,13 +370,13 @@ class ModeSelector(QMainWindow):
         outer.addSpacing(12)
 
         title = QLabel("Red Pitaya Control Suite")
-        title.setAlignment(Qt.AlignCenter)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet(
             "font-size: 24px; font-weight: bold; color: #ffffff;"
         )
 
         subtitle = QLabel("Choose an application to launch")
-        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet("font-size: 13px; color: #b1b1b1;")
 
         outer.addWidget(title)
@@ -396,7 +408,7 @@ class ModeSelector(QMainWindow):
         outer.addSpacing(20)
 
         self.status_label = QLabel("No application open.")
-        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("color: #b1b1b1; font-size: 12px;")
         outer.addWidget(self.status_label)
         outer.addStretch(1)
@@ -405,7 +417,7 @@ class ModeSelector(QMainWindow):
             "Dewin Andrés Soto Cabeza  \u2022  "
             "Professor Francisco Juan Racedo Niebles"
         )
-        authors_label.setAlignment(Qt.AlignCenter)
+        authors_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         authors_label.setStyleSheet("color: #888888; font-size: 11px;")
         outer.addWidget(authors_label)
 
@@ -426,7 +438,7 @@ class ModeSelector(QMainWindow):
         form.addRow("IPv4 address:", self.ip_edit)
 
         self.password_edit = QLineEdit()
-        self.password_edit.setEchoMode(QLineEdit.Password)
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("Password:", self.password_edit)
 
         connect_row = QHBoxLayout()
@@ -441,6 +453,30 @@ class ModeSelector(QMainWindow):
         connect_row.addStretch(1)
 
         form.addRow(connect_row)
+
+        saved_row = QHBoxLayout()
+
+        self.save_connection_button = QPushButton("Save")
+        self.save_connection_button.setToolTip(
+            "Save the hostname / IP and password above to the saved "
+            "connections file (JSON). Passwords are stored in plain text."
+        )
+        self.save_connection_button.clicked.connect(
+            self._save_current_connection
+        )
+        saved_row.addWidget(self.save_connection_button)
+
+        self.saved_connections_button = QPushButton("Saved connections\u2026")
+        self.saved_connections_button.setToolTip(
+            "Pick a saved Red Pitaya. Add and Delete are inside."
+        )
+        self.saved_connections_button.clicked.connect(
+            self._open_saved_connections
+        )
+        saved_row.addWidget(self.saved_connections_button)
+        saved_row.addStretch(1)
+
+        form.addRow(saved_row)
 
         self.debug_override_checkbox = QCheckBox(
             "Skip SSH connection / FPGA switching (debug)"
@@ -498,8 +534,9 @@ class ModeSelector(QMainWindow):
         self.status_label.setText(f"Switching to {mode} \u2026")
 
         self._switch_worker = SwitchWorker(self.rp_ssh, mode)
+        host = self.rp_ssh.host
         self._switch_worker.finished_ok.connect(
-            lambda: self._on_switch_ok(mode, self.rp_ssh.host)
+            lambda: self._on_switch_ok(mode, host)
         )
         self._switch_worker.finished_error.connect(
             self._on_switch_error
@@ -580,6 +617,86 @@ class ModeSelector(QMainWindow):
             message,
         )
 
+    # ------------------------------------------------------------------ #
+    # Saved connections
+    # ------------------------------------------------------------------ #
+    def _save_current_connection(self):
+        hostname = self.host_edit.text().strip()
+        ip = self.ip_edit.text().strip()
+        password = self.password_edit.text()
+
+        if not (hostname or ip):
+            QMessageBox.warning(
+                self,
+                "Missing Host",
+                "Enter the Red Pitaya's hostname or IPv4 address first.",
+            )
+            return
+
+        if not password:
+            QMessageBox.warning(
+                self,
+                "Missing Password",
+                "Enter the Red Pitaya's password first.",
+            )
+            return
+
+        name, ok = QInputDialog.getText(
+            self,
+            "Save Connection",
+            "Name for this Red Pitaya:",
+            QLineEdit.EchoMode.Normal,
+            self.saved_connections.next_default_name(),
+        )
+        if not ok:
+            return
+        name = name.strip() or self.saved_connections.next_default_name()
+
+        if self.saved_connections.exists(name):
+            reply = QMessageBox.question(
+                self,
+                "Overwrite?",
+                f"A saved connection named \"{name}\" already exists.\n"
+                "Replace it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            replaced = self.saved_connections.upsert(
+                {
+                    "name": name,
+                    "hostname": hostname,
+                    "ip": ip,
+                    "password": password,
+                }
+            )
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Save Failed",
+                f"Could not write the saved connections file:\n{exc}",
+            )
+            return
+
+        verb = "Updated" if replaced else "Saved"
+        self.statusBar().showMessage(f"{verb} connection \"{name}\"", 4000)
+
+    def _open_saved_connections(self):
+        dialog = SavedConnectionsDialog(self.saved_connections, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected is None:
+            return
+
+        entry = dialog.selected
+        self.host_edit.setText(entry["hostname"])
+        self.ip_edit.setText(entry["ip"])
+        self.password_edit.setText(entry["password"])
+        self.statusBar().showMessage(
+            f"Loaded connection \"{entry['name']}\"", 4000
+        )
+
     def _set_launcher_enabled(self, enabled: bool):
         self.osc_card.setEnabled(enabled)
         self.lia_card.setEnabled(enabled)
@@ -588,11 +705,29 @@ class ModeSelector(QMainWindow):
         self.password_edit.setEnabled(enabled)
         self.debug_override_checkbox.setEnabled(enabled)
         self.connect_button.setEnabled(enabled)
+        self.save_connection_button.setEnabled(enabled)
+        self.saved_connections_button.setEnabled(enabled)
 
     def _launch_window(self, mode: str, host: str):
         global current_rp_host
 
         if mode == "Oscilloscope":
+            # The oscilloscope plot's SCPI client is created unconnected at
+            # import time. Connect it now -- i.e. only after the Red Pitaya
+            # connection (and FPGA switch) is done.
+            #
+            # rp_ip is set synchronously because the Oscilloscope window reads
+            # it below to fill its IP field; the actual connection runs in a
+            # background thread so a slow or unreachable board can't freeze
+            # the launcher.
+            bokeh_plot.rp_ip = host
+            Thread(
+                target=bokeh_plot.connect_rp,
+                args=(host,),
+                name="osc-scpi-connect",
+                daemon=True,
+            ).start()
+
             window = Oscilloscope(
                 QApplication.instance(),
                 rp_plot=bokeh_plot,
@@ -621,7 +756,7 @@ class ModeSelector(QMainWindow):
         # Ensure the underlying window object is actually destroyed (not
         # just hidden) when it closes, so reopening it always starts from
         # a fresh, default state.
-        window.setAttribute(Qt.WA_DeleteOnClose)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         window.back_to_menu.connect(self.return_to_menu)
 
         self.current_window = window
@@ -646,6 +781,8 @@ class ModeSelector(QMainWindow):
         old_window = self.current_window
         self.current_window = None
         self.current_mode = None
+        if old_window is None:
+            return
         try:
             old_window.back_to_menu.disconnect(self.return_to_menu)
         except (TypeError, RuntimeError):
@@ -675,7 +812,9 @@ class ModeSelector(QMainWindow):
     def _quit_application(self):
         if self.current_window is not None:
             self._discard_current_window()
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def show_selector(self):
         """Show the application selector without closing the current mode."""
@@ -697,7 +836,9 @@ class ModeSelector(QMainWindow):
         # the whole app. That means closing the selector itself when no
         # application is open must quit explicitly, or nothing is left to
         # tell Qt the app should exit.
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
 
 # ============================================================================

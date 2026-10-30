@@ -16,17 +16,17 @@ class RedPitayaLIA:
     REG_SOFT_RESET = 0x10
     REG_K = 0x14
     REG_N_STAGES = 0x18
-    REG_NOISE = 0x1C
+    # REG_NOISE = 0x1C
     REG_EXT_REF = 0x20
     REG_ZC_THRESH = 0x24
     REG_PERIOD = 0x28
 
     MIN_K = 0
-    MAX_K = 25
+    MAX_K = 31
     MIN_STAGES = 1
-    MAX_STAGES = 10
-    MIN_NOISE = 0
-    MAX_NOISE = 15
+    MAX_STAGES = 8
+    # MIN_NOISE = 0
+    # MAX_NOISE = 15
     MIN_ZC_THRESH = -8192
     MAX_ZC_THRESH = 8191
 
@@ -178,14 +178,14 @@ class RedPitayaLIA:
     def get_n_stages(self) -> int:
         return self._read_reg(self.REG_N_STAGES)
 
-    def set_noise(self, noise: int) -> None:
-        noise = int(noise)
-        if not self.MIN_NOISE <= noise <= self.MAX_NOISE:
-            raise ValueError(f"Noise level must be between {self.MIN_NOISE} and {self.MAX_NOISE}")
-        self._write_reg(self.REG_NOISE, noise)
+    # def set_noise(self, noise: int) -> None:
+    #     noise = int(noise)
+    #     if not self.MIN_NOISE <= noise <= self.MAX_NOISE:
+    #         raise ValueError(f"Noise level must be between {self.MIN_NOISE} and {self.MAX_NOISE}")
+    #     self._write_reg(self.REG_NOISE, noise)
 
-    def get_noise(self) -> int:
-        return self._read_reg(self.REG_NOISE)
+    # def get_noise(self) -> int:
+    #     return self._read_reg(self.REG_NOISE)
 
     def set_ext_ref(self, enabled: bool) -> None:
         self._write_reg(self.REG_EXT_REF, 1 if enabled else 0)
@@ -225,7 +225,7 @@ class RedPitayaLIA:
         phase_offset_rad: float | None = None,
         k: int | None = None,
         n_stages: int | None = None,
-        noise: int | None = None,
+        # noise: int | None = None,
         ext_ref: bool | None = None,
         zc_threshold: int | None = None,
     ) -> None:
@@ -237,8 +237,8 @@ class RedPitayaLIA:
             self.set_k(k)
         if n_stages is not None:
             self.set_n_stages(n_stages)
-        if noise is not None:
-            self.set_noise(noise)
+        # if noise is not None:
+        #     self.set_noise(noise)
         if ext_ref is not None:
             self.set_ext_ref(ext_ref)
         if zc_threshold is not None:
@@ -327,7 +327,7 @@ class RedPitayaLIA:
             "phase_offset_rad": self.get_phase_offset(),
             "k": self.get_k(),
             "n_stages": self.get_n_stages(),
-            "noise": self.get_noise(),
+            # "noise": self.get_noise(),
             "ext_ref": self.get_ext_ref(),
             "zc_threshold": self.get_zc_threshold(),
             "period": period,

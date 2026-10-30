@@ -1,4 +1,6 @@
-﻿import numpy as np
+﻿from __future__ import annotations
+
+import numpy as np
 import app.redpitaya_scpi.redpitaya_scpi as scpi
 import time
 
@@ -10,13 +12,31 @@ class ScpiData:
     def __init__(self, ip_address, port=5000):
         self.ip_address = ip_address
         self.port = port
-        # NOTE: scpi.scpi(host, timeout, port) -> pass the port by keyword
-        self.rp = scpi.scpi(ip_address, port=port)
+        # No socket is opened here. The connection is made explicitly with
+        # connect(), once the Red Pitaya's address is actually known and the
+        # board is ready (constructing this object must never touch the network).
+        self.rp: scpi.scpi | None = None
         self.decimation = int(2**3)
         self.window = 8192            # samples returned per frame (centred on the trigger)
         self.last_triggered = True    # False if a software trigger found no edge (free-run frame)
 
+    @property
+    def has_socket(self) -> bool:
+        """True once connect() has created an SCPI client (does not ping the board)."""
+        return self.rp is not None
+
+    def _client(self) -> scpi.scpi:
+        """The live SCPI client, or ConnectionError if connect() hasn't run.
+        Returning a non-Optional type here is what lets every method below use
+        a plain local `rp` without Optional-member-access warnings."""
+        rp = self.rp
+        if rp is None:
+            raise ConnectionError("Not connected to the Red Pitaya (call connect() first)")
+        return rp
+
     def connect(self):
+        self.close()  # drop any previous socket instead of leaking it
+        # NOTE: scpi.scpi(host, timeout, port) -> pass the port by keyword
         self.rp = scpi.scpi(self.ip_address, port=self.port)
 
     def generate_signal(self, channel=1, frequency=15000, amplitude=0.75, offset=0.0, waveform='sine'):
@@ -37,6 +57,7 @@ class ScpiData:
         """
         if channel not in (1,2):
             raise ValueError(f"channel must be 1 or 2, got {channel}")
+        rp = self._client()
         wf = waveform.lower()
         valid = {'sine','square','triangle','sawu','sawd','pwm','arbitrary','dc','dc_neg'}
         if wf not in valid:
@@ -51,20 +72,21 @@ class ScpiData:
         print(f"Generating {waveform} signal on channel {channel} with frequency {frequency} Hz, amplitude {amplitude} Vpp, and offset {offset} V.")
 
         # Reset the channel and set the waveform parameters
-        self.rp.tx_txt(f'SOUR{str(channel)}:FUNC:RESET')
+        rp.tx_txt(f'SOUR{str(channel)}:FUNC:RESET')
 
         # Set the waveform type, frequency, amplitude, and offset
-        self.rp.tx_txt(f'SOUR{str(channel)}:FUNC {str(waveform.upper())}')
-        self.rp.tx_txt(f'SOUR{str(channel)}:FREQ:FIX {str(frequency)}')
-        self.rp.tx_txt(f'SOUR{str(channel)}:VOLT {str(amplitude)}')
-        self.rp.tx_txt(f'SOUR{str(channel)}:VOLT:OFFS {str(offset)}')
-        self.rp.tx_txt(f"SOUR{channel}:TRIG:INT")
+        rp.tx_txt(f'SOUR{str(channel)}:FUNC {str(waveform.upper())}')
+        rp.tx_txt(f'SOUR{str(channel)}:FREQ:FIX {str(frequency)}')
+        rp.tx_txt(f'SOUR{str(channel)}:VOLT {str(amplitude)}')
+        rp.tx_txt(f'SOUR{str(channel)}:VOLT:OFFS {str(offset)}')
+        rp.tx_txt(f"SOUR{channel}:TRIG:INT")
 
         # Enable the output
-        self.rp.tx_txt(f'OUTPUT{str(channel)}:STATE ON')
+        rp.tx_txt(f'OUTPUT{str(channel)}:STATE ON')
 
     def trigger_generation(self):
-        self.rp.tx_txt(f'SOUR:TRIG:INT')
+        rp = self._client()
+        rp.tx_txt(f'SOUR:TRIG:INT')
 
     def stop_signal(self, channel=1):
         """
@@ -72,10 +94,11 @@ class ScpiData:
         """
         if channel not in (1, 2):
             raise ValueError(f"Channel must be 1 or 2, got {channel}")
-        if not self.rp._socket:
+        rp = self.rp
+        if rp is None or not rp._socket:
             print("Not connected to Red Pitaya")
             return
-        self.rp.tx_txt(f'OUTPUT{channel}:STATE OFF')
+        rp.tx_txt(f'OUTPUT{channel}:STATE OFF')
 
     def reset(self, channel=1):
         """
@@ -84,31 +107,38 @@ class ScpiData:
 
         if channel not in (1, 2):
             raise ValueError(f"Channel must be 1 or 2, got {channel}")
-        self.rp.tx_txt(f'SOUR{str(channel)}:FUNC:RESET')
+        rp = self._client()
+        rp.tx_txt(f'SOUR{str(channel)}:FUNC:RESET')
 
     def configure_acquisition(self, decimation, trigger_level, data_units, data_format, trigger_source):
+        rp = self._client()
         self.decimation = decimation
-        self.rp.tx_txt(f"ACQ:DEC {str(decimation)}")
-        self.rp.tx_txt(f"ACQ:DATA:UNITS {str(data_units).upper()}")
-        self.rp.tx_txt(f"ACQ:DATA:FORMAT {str(data_format).upper()}")
-        self.rp.tx_txt(f"ACQ:TRig:LEV {str(trigger_level)}")
-        self.rp.tx_txt(f"ACQ:TRig {str(trigger_source)}")
+        rp.tx_txt(f"ACQ:DEC {str(decimation)}")
+        rp.tx_txt(f"ACQ:DATA:UNITS {str(data_units).upper()}")
+        rp.tx_txt(f"ACQ:DATA:FORMAT {str(data_format).upper()}")
+        rp.tx_txt(f"ACQ:TRig:LEV {str(trigger_level)}")
+        rp.tx_txt(f"ACQ:TRig {str(trigger_source)}")
 
     def stop_acquisition(self):
-        self.rp.tx_txt('ACQ:STOP')
+        rp = self._client()
+        rp.tx_txt('ACQ:STOP')
 
     def is_rp_connected(self):
+        rp = self.rp
+        if rp is None:
+            return False
         try:
-            self.rp.tx_txt("*IDN?")
-            _ = self.rp.rx_txt()
+            rp.tx_txt("*IDN?")
+            _ = rp.rx_txt()
             return True
         except Exception:
             return False
 
     def _read_block(self, cmd):
         """Send a query that returns a binary block of big-endian float32 and parse it."""
-        self.rp.tx_txt(cmd)
-        raw = self.rp.rx_arb()
+        rp = self._client()
+        rp.tx_txt(cmd)
+        raw = rp.rx_arb()
         if not raw:
             raise ValueError(f"Empty response for {cmd}")
         n = (len(raw) // 4) * 4
@@ -161,46 +191,47 @@ class ScpiData:
         `center` is a trigger delay in samples (clamped to +-4096); `data_format`
         is ignored (always binary).
         """
+        rp = self._client()
         self.decimation = decimation
         src = str(trigger_source).upper()
         sw = self._SW_TRIGGERS.get(src)
         hw_source = 'NOW' if (sw is not None or src == 'DISABLED') else src
 
         # 1. Reset first, then configure
-        self.rp.tx_txt("ACQ:RST")
-        self.rp.tx_txt("ACQ:DATA:FORMAT BIN")
-        self.rp.tx_txt(f"ACQ:DATA:UNITS {data_units.upper()}")
-        self.rp.tx_txt(f"ACQ:DEC {int(decimation)}")
-        self.rp.tx_txt("ACQ:TRIG:DLY 8192")
-        self.rp.tx_txt(f"ACQ:TRIG:LEV {float(trigger_level)}")
+        rp.tx_txt("ACQ:RST")
+        rp.tx_txt("ACQ:DATA:FORMAT BIN")
+        rp.tx_txt(f"ACQ:DATA:UNITS {data_units.upper()}")
+        rp.tx_txt(f"ACQ:DEC {int(decimation)}")
+        rp.tx_txt("ACQ:TRIG:DLY 8192")
+        rp.tx_txt(f"ACQ:TRIG:LEV {float(trigger_level)}")
 
         # 2. Start, give the buffer a moment (kept from the tested sequence), then arm
-        self.rp.tx_txt("ACQ:START")
+        rp.tx_txt("ACQ:START")
         time.sleep(min(RING_SIZE * int(decimation) / ADC_CLOCK * 1.5 + 0.01, 0.1))
-        self.rp.tx_txt(f"ACQ:TRIG {hw_source}")
+        rp.tx_txt(f"ACQ:TRIG {hw_source}")
 
         # 3. Wait for trigger detected AND buffer full
         start_time = time.time()
         while True:
-            self.rp.tx_txt("ACQ:TRIG:STAT?")
-            trig_stat = (self.rp.rx_txt() or "").strip()
-            self.rp.tx_txt("ACQ:TRIG:FILL?")
-            fill_stat = (self.rp.rx_txt() or "").strip()
+            rp.tx_txt("ACQ:TRIG:STAT?")
+            trig_stat = (rp.rx_txt() or "").strip()
+            rp.tx_txt("ACQ:TRIG:FILL?")
+            fill_stat = (rp.rx_txt() or "").strip()
             if trig_stat == "TD" and fill_stat == "1":
                 break
             if time.time() - start_time > timeout:
                 try:
-                    self.rp.tx_txt("ACQ:STOP")
+                    rp.tx_txt("ACQ:STOP")
                 except Exception:
                     pass
                 raise TimeoutError("Timeout waiting for trigger and full buffer")
             time.sleep(0.0005)
 
         # 4. Read the raw rings plus the write pointer (index of the newest sample)
-        wpos = int(self.rp.txrx_txt("ACQ:WPOS?"))
+        wpos = int(rp.txrx_txt("ACQ:WPOS?"))
         ring1 = self._read_block(f"ACQ:SOUR1:DATA:START:END? 0,{RING_SIZE - 1}")
         ring2 = self._read_block(f"ACQ:SOUR2:DATA:START:END? 0,{RING_SIZE - 1}")
-        wpos_after = int(self.rp.txrx_txt("ACQ:WPOS?"))
+        wpos_after = int(rp.txrx_txt("ACQ:WPOS?"))
 
         if wpos_after != wpos:
             raise RuntimeError("Write pointer moved while reading; frame discarded")
@@ -233,11 +264,20 @@ class ScpiData:
                 self._window(y[1], idx, pre, post, delay))
 
     def acq_setDecimation(self, value: int):
-        self.rp.tx_txt(f"ACQ:DEC {value}")
+        rp = self._client()
+        rp.tx_txt(f"ACQ:DEC {value}")
 
     def acq_getDecimation(self) -> str:
-        self.rp.tx_txt("ACQ:DEC?")
-        return self.rp.rx_txt() or ""
+        rp = self._client()
+        rp.tx_txt("ACQ:DEC?")
+        return rp.rx_txt() or ""
 
     def close(self):
-        self.rp.close()
+        rp = self.rp
+        if rp is None:
+            return
+        self.rp = None
+        try:
+            rp.close()
+        except Exception as exc:
+            print("Error closing SCPI connection:", exc)

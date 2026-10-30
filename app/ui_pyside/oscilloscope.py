@@ -4,17 +4,24 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QTabWidget, QDoubleSpinBox, QSpinBox,
     QComboBox, QPushButton, QSizePolicy, QFormLayout,
-    QRadioButton, QStatusBar, QLabel, QGridLayout,
+    QButtonGroup, QRadioButton, QStatusBar, QLabel, QGridLayout,
     QFileDialog, QMessageBox, QLineEdit
 )
 from PySide6.QtGui import QAction, QActionGroup, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from app.rp_plot.plot_setup import BokehPlot
+from app.paths import resource_path
 from app.ui_pyside.generator import GeneratorSettingsWidget
 
 
 class Oscilloscope(QMainWindow):
     """Control panel window for the Red Pitaya oscilloscope / real-time plot."""
+
+    SCALE_MULTIPLIERS = (1, 2, 5, 10)
+
+    # Fixed width (px) of the left sidebar, so it never resizes as values change.
+    # Raise it if any control looks cramped.
+    SIDEBAR_WIDTH = 320
 
     STATUS_CONNECTED_STYLE = "background-color: green; border-radius: 6px;"
     STATUS_DISCONNECTED_STYLE = "background-color: red; border-radius: 6px;"
@@ -40,7 +47,11 @@ class Oscilloscope(QMainWindow):
 
         # Closing this window normally hands control back to the main
         # menu; only an explicit "Exit" quits the whole application.
-        self._quit_app_on_close = False
+        self._quit_app_on_close = True
+
+        # Scale-control (cross pad) step multiplier: one click = this many
+        # base zoom steps. Chosen with the radio buttons under the cross.
+        self.scale_multiplier = 1
 
         # Default values
         self.default_port = "None"
@@ -80,8 +91,13 @@ class Oscilloscope(QMainWindow):
         sidebar_layout.addWidget(self._build_plot_options_group())
         sidebar_layout.addStretch()
         sidebar_layout.addLayout(self._build_logo_row())
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
 
-        main_layout.addLayout(sidebar_layout, stretch=0)
+        sidebar_widget = QWidget()
+        sidebar_widget.setLayout(sidebar_layout)
+        sidebar_widget.setFixedWidth(self.SIDEBAR_WIDTH)
+
+        main_layout.addWidget(sidebar_widget, stretch=0)
         main_layout.addWidget(self.browser, stretch=1)
 
         self.setCentralWidget(self.central_widget)
@@ -251,16 +267,45 @@ class Oscilloscope(QMainWindow):
         dpad_layout.setVerticalSpacing(2)
         dpad_layout.setHorizontalSpacing(10)
 
+        # Multiplier for the four buttons above (applies to both V and T)
+        multiplier_row = QHBoxLayout()
+        multiplier_row.addWidget(QLabel("Step:"))
+        self.scale_multiplier_group = QButtonGroup(self)  # own group: independent of other radios
+        for multiplier in self.SCALE_MULTIPLIERS:
+            radio = QRadioButton(f"\u00d7{multiplier}")
+            radio.setToolTip(f"Each click zooms {multiplier} step(s) of 10% at once")
+            radio.setChecked(multiplier == self.scale_multiplier)
+            radio.toggled.connect(
+                lambda checked, m=multiplier: self._set_scale_multiplier(m) if checked else None
+            )
+            self.scale_multiplier_group.addButton(radio)
+            multiplier_row.addWidget(radio)
+        dpad_layout.addLayout(multiplier_row, 3, 0, 1, 3)
+
+        # factors are read at click time so a change of multiplier applies immediately
         up_btn.clicked.connect(lambda: self._nudge_range(
-            self.min_y_spin, self.max_y_spin, factor=1.1, update_func=self.rp_plot.update_y_range))
+            self.min_y_spin, self.max_y_spin, factor=self._scaled_factor(1.1),
+            update_func=self.rp_plot.update_y_range))
         down_btn.clicked.connect(lambda: self._nudge_range(
-            self.min_y_spin, self.max_y_spin, factor=0.9, update_func=self.rp_plot.update_y_range))
+            self.min_y_spin, self.max_y_spin, factor=self._scaled_factor(0.9),
+            update_func=self.rp_plot.update_y_range))
         left_btn.clicked.connect(lambda: self._nudge_range(
-            self.min_x_spin, self.max_x_spin, factor=0.9, update_func=self.rp_plot.update_x_range))
+            self.min_x_spin, self.max_x_spin, factor=self._scaled_factor(0.9),
+            update_func=self.rp_plot.update_x_range))
         right_btn.clicked.connect(lambda: self._nudge_range(
-            self.min_x_spin, self.max_x_spin, factor=1.1, update_func=self.rp_plot.update_x_range))
+            self.min_x_spin, self.max_x_spin, factor=self._scaled_factor(1.1),
+            update_func=self.rp_plot.update_x_range))
 
         return dpad_layout
+
+    def _set_scale_multiplier(self, multiplier: int) -> None:
+        self.scale_multiplier = multiplier
+
+    def _scaled_factor(self, base_factor: float) -> float:
+        """base_factor applied `scale_multiplier` times, i.e. the same as
+        clicking that many times. Stays positive for any multiplier, and x1
+        is exactly the original 1.1 / 0.9."""
+        return base_factor ** self.scale_multiplier
 
     @staticmethod
     def _nudge_range(min_spin: QDoubleSpinBox, max_spin: QDoubleSpinBox, factor: float, update_func):
@@ -273,9 +318,9 @@ class Oscilloscope(QMainWindow):
     def _build_logo_row(self) -> QHBoxLayout:
         logo_layout = QHBoxLayout()
         self.uni_logo = QLabel()
-        self.uni_logo.setPixmap(QPixmap("assets/ua.png").scaledToWidth(75))
+        self.uni_logo.setPixmap(QPixmap(resource_path("assets/ua.png")).scaledToWidth(75))
         self.group_logo = QLabel()
-        self.group_logo.setPixmap(QPixmap("assets/geoel.png").scaledToWidth(100))
+        self.group_logo.setPixmap(QPixmap(resource_path("assets/geoel.png")).scaledToWidth(100))
         logo_layout.addWidget(self.uni_logo)
         logo_layout.addWidget(self.group_logo)
         return logo_layout
@@ -400,7 +445,9 @@ class Oscilloscope(QMainWindow):
         event.accept()
 
         if self._quit_app_on_close:
-            QApplication.instance().quit()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
         else:
             self.back_to_menu.emit()
 

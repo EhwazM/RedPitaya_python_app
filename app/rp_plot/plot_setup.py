@@ -11,7 +11,7 @@ from app.rp_data_acquisition.serial_data import SerialData
 from app.rp_lia.redpitaya_lia import RedPitayaLIA
 
 class BokehPlot:
-    def __init__(self, plot_b, n_plots=2, baud_rate=115200 ,roll_over=5000, colors=['red', 'blue', 'green', 'yellow', 'orange', 'purple'], update_time=10, scatter_plot=False, oscilloscope_mode=False, sampling_rate=125e6, rp=None, rp_ip='rp-f0c5e4.local'):
+    def __init__(self, plot_b, n_plots=2, baud_rate=115200 ,roll_over=5000, colors=['red', 'blue', 'green', 'yellow', 'orange', 'purple'], update_time=10, scatter_plot=False, oscilloscope_mode=False, sampling_rate=125e6, rp=None, rp_ip=''):
         self.n_plots = n_plots
         self.plot_b = plot_b
         self.roll_over = roll_over
@@ -33,6 +33,9 @@ class BokehPlot:
         self.trigger_delay = 0  # en muestras, -8192 a 8192
         self.rp_ip = rp_ip
         self.rp_connected = False
+        # Serialises connect_rp() so a background connect (launched from
+        # main.py) and a lazy reconnect from generate_signal() can't race.
+        self._connect_lock = threading.Lock()
 
         self.periodic_callback = None
         self.doc = None
@@ -45,18 +48,44 @@ class BokehPlot:
         if not self.osci:
             self.plot_b.x_range = DataRange1d()
 
+        # IMPORTANT: nothing here touches the network. ScpiData is created
+        # unconnected; the real connection is made later by connect_rp(),
+        # which main.py calls once the Red Pitaya connection is done.
         if rp is None:
-            try: 
-                self.rp = ScpiData(self.rp_ip)
-                self.rp_connected = self.rp.is_rp_connected()
-            except Exception as e:
-                print("Error initializing ScpiData:", e)    
+            self.rp = ScpiData(self.rp_ip)
         else:
+            self.rp = rp
             try:
-                self.rp = rp
                 self.rp_connected = self.rp.is_rp_connected()
             except Exception as e:
                 print("Error setting Red Pitaya instance:", e)
+
+    def connect_rp(self, ip: str | None = None) -> bool:
+        """(Re)connect the SCPI client to the Red Pitaya at `ip` (or the last
+        known address). Safe to call from any thread; never raises.
+        Returns True if the board answered."""
+        with self._connect_lock:
+            if ip:
+                self.rp_ip = ip
+            self.rp_connected = False
+
+            if not self.rp_ip:
+                print("BokehPlot: no Red Pitaya address set yet; not connecting.")
+                return False
+
+            try:
+                self.rp.ip_address = self.rp_ip
+                self.rp.connect()
+                self.rp_connected = self.rp.is_rp_connected()
+            # SystemExit too: some SCPI client versions call sys.exit() on a
+            # failed connect, which must not take the whole application down.
+            except (Exception, SystemExit) as e:
+                print(f"BokehPlot: could not connect to {self.rp_ip}:", e)
+                self.rp_connected = False
+
+            if self.rp_connected:
+                print(f"BokehPlot: connected to Red Pitaya at {self.rp_ip}")
+            return self.rp_connected
 
     def setup_plot(self):
         for i in range(self.n_plots):
@@ -156,7 +185,8 @@ class BokehPlot:
     
     def update_oscilloscope_scpi(self):
 
-        if self.reading:
+        # Nothing to read until connect_rp() has opened the socket.
+        if self.reading and self.rp.has_socket:
             try:
                 y1, y2 = self.rp.read_data(decimation=self.decimation, trigger_level=self.trigger_level, trigger_source=self.trigger_source, center=self.trigger_delay)  # type: ignore
             except Exception as e:
@@ -257,12 +287,16 @@ class BokehPlot:
 
     def change_to_oscilloscope_mode(self):
         def _update():
+            doc = self.doc
+            if doc is None:
+                return
+
             self.osci = True
             self.plot_b.x_range = Range1d(start=-30, end=30)
 
             if self.periodic_callback:
-                self.doc.remove_periodic_callback(self.periodic_callback)
-            self.periodic_callback = self.doc.add_periodic_callback(self.update_oscilloscope_scpi, self.update_time)
+                doc.remove_periodic_callback(self.periodic_callback)
+            self.periodic_callback = doc.add_periodic_callback(self.update_oscilloscope_scpi, self.update_time)
 
             if self.sr_data.sr is not None and self.sr_data.sr.is_open:
                 self.sr_data.sr.close()
@@ -274,12 +308,16 @@ class BokehPlot:
 
     def change_to_real_time_mode(self):
         def _update():
+            doc = self.doc
+            if doc is None:
+                return
+
             self.osci = False
             self.plot_b.x_range = DataRange1d()
 
             if self.periodic_callback:
-                self.doc.remove_periodic_callback(self.periodic_callback)
-            self.periodic_callback = self.doc.add_periodic_callback(self.update_real_time, self.update_time)
+                doc.remove_periodic_callback(self.periodic_callback)
+            self.periodic_callback = doc.add_periodic_callback(self.update_real_time, self.update_time)
 
             if self.sr_data.sr is not None and self.sr_data.sr.is_open:
                 self.sr_data.sr.close()
@@ -388,8 +426,7 @@ class BokehPlot:
         if self.osci:
             try:
                 if not self.rp_connected:
-                    self.rp.connect()
-                    self.rp_connected = self.rp.is_rp_connected()
+                    self.connect_rp()
                 if self.rp_connected:
                     self.rp.generate_signal(channel=ch, amplitude=vpp/2, frequency=fq, waveform=wf)
                 else:
@@ -425,19 +462,10 @@ class BokehPlot:
     
     def update_rp_ip(self, new_ip: str):
         def _update():
-            self.rp_connected = False
-            self.rp_ip = new_ip
-            self.rp.ip_address = new_ip
-
-            try:
-                self.rp.connect()
-                self.rp_connected = self.rp.is_rp_connected()
-            except Exception as e:
-                print("Error updating Red Pitaya IP:", e)
-                self.rp_connected = self.rp.is_rp_connected()
-                return
-
-            print(f"Updated Red Pitaya IP to: {self.rp_ip}")
+            if self.connect_rp(new_ip):
+                print(f"Updated Red Pitaya IP to: {self.rp_ip}")
+            else:
+                print(f"Red Pitaya IP set to {self.rp_ip}, but it is not reachable.")
 
         if self.doc is not None:
             self._safe_next_tick(_update)
@@ -497,7 +525,7 @@ class LIABokehPlot:
         self._stop_event = threading.Event()
         self._poll_thread: threading.Thread | None = None
 
-        self.source = None
+        self.source: ColumnDataSource | None = None
         self.plots = []
         self.layout = None
 
@@ -708,7 +736,11 @@ class LIABokehPlot:
             )
 
     def _push_measurement(self, elapsed, measurement) -> None:
-        self.source.stream(
+        source = self.source
+        if source is None:
+            return
+
+        source.stream(
             {
                 "x": [elapsed],
                 "I": [measurement["I"]],
@@ -724,7 +756,7 @@ class LIABokehPlot:
 # would explain both an increasingly laggy plot and an
 # increasingly slow Clear (more data/DOM = more work competing
 # for the browser's single UI thread on every redraw).
-        n_points = len(self.source.data["x"])
+        n_points = len(source.data["x"])
         if n_points > self.roll_over:
             print(
                 f"[LIA] WARNING: source has {n_points} points, "
@@ -770,29 +802,37 @@ class LIABokehPlot:
         if self.doc is None:
             return
 
+        source = self.source
+        if source is None:
+            return
+
         def clear():
             print(
                 f"[LIA] clear() actually ran at "
                 f"{time.strftime('%H:%M:%S')}"
             )
-            self.source.data = {
-                "x": [],
-                "I": [],
-                "Q": [],
-                "R": [],
-                "Phase": [],
+            source.data = {
+                "x": np.array([], dtype=float),
+                "I": np.array([], dtype=float),
+                "Q": np.array([], dtype=float),
+                "R": np.array([], dtype=float),
+                "Phase": np.array([], dtype=float),
             }
             self.start = time.time()
 
         self.doc.add_next_tick_callback(clear)
 
     def save_current_data(self, filename):
+        source = self.source
+        if source is None:
+            return
+
         data = {
-            "time": self.source.data["x"],
-            "X": self.source.data["I"],
-            "Y": self.source.data["Q"],
-            "R": self.source.data["R"],
-            "Phase": self.source.data["Phase"],
+            "time": source.data["x"],
+            "X": source.data["I"],
+            "Y": source.data["Q"],
+            "R": source.data["R"],
+            "Phase": source.data["Phase"],
         }
 
         pd.DataFrame(data).to_csv(
