@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from assets.dark_theme import pyside6_simple_dark_theme
+from docs.dark_theme import pyside6_simple_dark_theme
 from app.paths import resource_path
 from app.rp_lia.redpitaya_lia import RedPitayaLIA
 from app.ui_pyside.calibration_tool import CalibrationDialog
@@ -748,13 +748,13 @@ class LockInAmp(QMainWindow):
 
         self.uni_logo = QLabel()
         self.uni_logo.setPixmap(
-            QPixmap(resource_path('assets/ua.png')).scaledToWidth(75)
+            QPixmap(resource_path('docs/ua.png')).scaledToWidth(75, Qt.TransformationMode.SmoothTransformation)
         )
         self.uni_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.group_logo = QLabel()
         self.group_logo.setPixmap(
-            QPixmap(resource_path('assets/geoel.png')).scaledToWidth(100)
+            QPixmap(resource_path('docs/geoel.png')).scaledToWidth(100, Qt.TransformationMode.SmoothTransformation)
         )
         self.group_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
 

@@ -30,7 +30,7 @@ from bokeh.plotting import figure as bk_figure
 from bokeh.server.server import Server
 from tornado.ioloop import IOLoop
 
-from assets.dark_theme import pyside6_simple_dark_theme
+from docs.dark_theme import pyside6_simple_dark_theme
 from app.paths import resource_path
 from app.rp_plot.plot_setup import BokehPlot, LIABokehPlot
 from app.rp_ssh.ssh_control import RedPitayaSSH, RedPitayaSSHError
@@ -47,17 +47,23 @@ from app.ui_pyside.saved_connections import (
 # ============================================================================
 
 # Oscilloscope document
-oscilloscope_figure = bk_figure(
-    title="Signal",
-    sizing_mode="stretch_both",
-    x_axis_label="Time",
-    y_axis_label="Voltage (V)",
-    y_range=Range1d(start=-1, end=1),
-    x_range=Range1d(start=-30, end=30),
-)  # type: ignore
+def make_oscilloscope_figure():
+    """A brand-new figure. Bokeh models can belong to only one Document, and
+    every (re)opening of the Oscilloscope window is a new Document, so
+    BokehPlot calls this again for each session after the first."""
+    return bk_figure(
+        title="Signal",
+        sizing_mode="stretch_both",
+        x_axis_label="Time",
+        y_axis_label="Voltage (V)",
+        y_range=Range1d(start=-1, end=1),
+        x_range=Range1d(start=-30, end=30),
+    )  # type: ignore
+
 
 bokeh_plot = BokehPlot(
-    plot_b=oscilloscope_figure,
+    plot_b=make_oscilloscope_figure(),
+    figure_factory=make_oscilloscope_figure,
     n_plots=2,
     roll_over=1000,
     colors=["green", "purple", "blue"],
@@ -344,15 +350,13 @@ class ModeSelector(QMainWindow):
 
         self.uni_logo = QLabel()
         self.uni_logo.setPixmap(
-            QPixmap(resource_path("assets/ua.png")).scaledToWidth(
-            100, Qt.TransformationMode.SmoothTransformation
-        ))
+            QPixmap(resource_path("assets/ua.png")).scaledToWidth(75)
+        )
 
         self.group_logo = QLabel()
         self.group_logo.setPixmap(
-            QPixmap(resource_path("assets/geoel.png")).scaledToWidth(
-            150, Qt.TransformationMode.SmoothTransformation
-        ))
+            QPixmap(resource_path("assets/geoel.png")).scaledToWidth(100)
+        )
 
         layout.addWidget(self.uni_logo)
         layout.addStretch(1)

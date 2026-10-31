@@ -11,9 +11,15 @@ from app.rp_data_acquisition.serial_data import SerialData
 from app.rp_lia.redpitaya_lia import RedPitayaLIA
 
 class BokehPlot:
-    def __init__(self, plot_b, n_plots=2, baud_rate=115200 ,roll_over=5000, colors=['red', 'blue', 'green', 'yellow', 'orange', 'purple'], update_time=10, scatter_plot=False, oscilloscope_mode=False, sampling_rate=125e6, rp=None, rp_ip=''):
+    def __init__(self, plot_b, n_plots=2, baud_rate=115200 ,roll_over=5000, colors=['red', 'blue', 'green', 'yellow', 'orange', 'purple'], update_time=10, scatter_plot=False, oscilloscope_mode=True, sampling_rate=125e6, rp=None, rp_ip='', figure_factory=None):
         self.n_plots = n_plots
         self.plot_b = plot_b
+        # Bokeh models can belong to only ONE Document, but every time the
+        # Oscilloscope window is reopened the browser opens a new session
+        # (= a new Document). So each session after the first gets a fresh
+        # figure built by this factory instead of re-using the old one.
+        self._figure_factory = figure_factory
+        self._plot_in_use = False
         self.roll_over = roll_over
         self.colors = colors
         self.update_time = update_time
@@ -101,70 +107,78 @@ class BokehPlot:
         
         print("Setup ready!")
 
+    def _new_figure(self) -> None:
+        """Replace self.plot_b (+ its sources/lines) with a fresh figure for a
+        new Bokeh session, carrying over the view ranges and which channels
+        are visible. Needed because a figure can't be moved between
+        Documents, and detaching it from a still-alive old session from here
+        is not allowed (we don't hold that Document's lock)."""
+        assert self._figure_factory is not None
+        old = self.plot_b
+        old_lines = [line.visible for line in self.lines]
+        old_scatters = [scatter.visible for scatter in self.scatters]
+
+        fig = self._figure_factory()
+        if isinstance(old.y_range, Range1d) and isinstance(fig.y_range, Range1d):
+            fig.y_range.start, fig.y_range.end = old.y_range.start, old.y_range.end
+        if self.osci:
+            if isinstance(old.x_range, Range1d) and isinstance(fig.x_range, Range1d):
+                fig.x_range.start, fig.x_range.end = old.x_range.start, old.x_range.end
+        else:
+            fig.x_range = DataRange1d()
+
+        self.plot_b = fig
+        self.sources, self.lines, self.scatters = [], [], []
+        self.setup_plot()
+
+        for line, visible in zip(self.lines, old_lines):
+            line.visible = visible
+        for scatter, visible in zip(self.scatters, old_scatters):
+            scatter.visible = visible
+
+    def _tick(self, doc, fn):
+        """Wrap a periodic callback so it only runs while `doc` is still the
+        current session. A previous session's callbacks keep firing until
+        Bokeh finally destroys it; they must not touch the current figure."""
+        def run():
+            if self.doc is doc:
+                fn()
+        return run
+
     def attach_doc(self, doc):
-        # self.plot_b is a long-lived singleton reused across sessions.
-        # Relying solely on the *previous* session's teardown
-        # (_session_destroyed) to release it is racy: Bokeh's server-side
-        # detection that an old browser session is really gone has some
-        # lag (it can take a few seconds), so a fast switch can get here
-        # before that teardown has run, while the figure is still
-        # attached to the dying document. Checking the model's actual
-        # current owner directly -- rather than trusting our own
-        # self.doc bookkeeping -- and detaching it right here sidesteps
-        # that race entirely, regardless of when the old session's
-        # teardown callback eventually fires.
-        old_doc = self.plot_b.document
-        if old_doc is not None and old_doc is not doc:
-            try:
-                old_doc.remove_root(self.plot_b)
-            except Exception as exc:
-                print(
-                    "BokehPlot: could not detach previous "
-                    f"root before reattaching: {exc}"
-                )
+        if self._plot_in_use:
+            if self._figure_factory is not None:
+                self._new_figure()
+            else:
+                # No factory: best effort, re-using the single figure.
+                old_doc = self.plot_b.document
+                if old_doc is not None and old_doc is not doc:
+                    try:
+                        old_doc.remove_root(self.plot_b)
+                    except Exception as exc:
+                        print(f"BokehPlot: could not detach previous root: {exc}")
+        self._plot_in_use = True
 
         self.doc = doc
         doc.theme = "dark_minimal"
         doc.add_root(self.plot_b)
-        
-        if self.osci:
-            self.periodic_callback = doc.add_periodic_callback(self.update_oscilloscope_scpi, self.update_time)
-        else:
-            self.periodic_callback = doc.add_periodic_callback(self.update_real_time, self.update_time)
 
-        doc.on_session_destroyed(self._session_destroyed)
+        callback = self.update_oscilloscope_scpi if self.osci else self.update_real_time
+        self.periodic_callback = doc.add_periodic_callback(self._tick(doc, callback), self.update_time)
 
-    def _session_destroyed(self, session_context):
-        # Unlike LIABokehPlot, this instance is a long-lived singleton
-        # reused across every open/close of the Oscilloscope window (see
-        # main.py). Without this, self.doc would keep pointing at a dead,
-        # torn-down Document after the browser session/window closes --
-        # and since sidebar widgets fire their callbacks immediately on
-        # construction (e.g. GeneratorSettingsWidget.emit_values() in its
-        # __init__), reopening the window can call back into this object
-        # and try to schedule work on that stale doc before any new
-        # session has attached, crashing deep inside Bokeh's internals.
-        #
-        # self.plot_b is ALSO a long-lived singleton (created once at
-        # module load in main.py) reused across sessions the same way.
-        # attach_doc() calls doc.add_root(self.plot_b), which permanently
-        # marks that figure -- and every model nested inside it, like its
-        # tick formatters -- as owned by that specific Document. Without
-        # explicitly releasing it here, the next session's attach_doc()
-        # tries to add_root() a figure Bokeh still considers owned by the
-        # now-dead previous document, and raises "Models must be owned by
-        # only a single document" instead of ever attaching.
-        if self.doc is not None:
-            try:
-                self.doc.remove_root(self.plot_b)
-            except Exception as exc:
-                print(
-                    "BokehPlot: could not remove root during "
-                    f"session teardown: {exc}"
-                )
+        def _on_destroyed(session_context):
+            self._session_destroyed(doc)
+        doc.on_session_destroyed(_on_destroyed)
 
-        self.doc = None
-        self.periodic_callback = None
+    def _session_destroyed(self, doc):
+        # Only forget the session if it is still the CURRENT one. When the
+        # Oscilloscope window is reopened, the previous session is destroyed
+        # some time AFTER the new one attached; clearing self.doc then would
+        # cut off the live session. (No root removal needed any more: every
+        # session owns its own figure.)
+        if self.doc is doc:
+            self.doc = None
+            self.periodic_callback = None
 
     def _safe_next_tick(self, callback) -> None:
         """Schedule callback via add_next_tick_callback, but only if a
@@ -175,8 +189,13 @@ class BokehPlot:
         doc = self.doc
         if doc is None:
             return
+        def guarded():
+            # skip work queued on a session that has been replaced meanwhile
+            if self.doc is doc:
+                callback()
+
         try:
-            doc.add_next_tick_callback(callback)
+            doc.add_next_tick_callback(guarded)
         except Exception as exc:
             print(
                 "BokehPlot: could not schedule update "
@@ -296,7 +315,7 @@ class BokehPlot:
 
             if self.periodic_callback:
                 doc.remove_periodic_callback(self.periodic_callback)
-            self.periodic_callback = doc.add_periodic_callback(self.update_oscilloscope_scpi, self.update_time)
+            self.periodic_callback = doc.add_periodic_callback(self._tick(doc, self.update_oscilloscope_scpi), self.update_time)
 
             if self.sr_data.sr is not None and self.sr_data.sr.is_open:
                 self.sr_data.sr.close()
@@ -317,7 +336,7 @@ class BokehPlot:
 
             if self.periodic_callback:
                 doc.remove_periodic_callback(self.periodic_callback)
-            self.periodic_callback = doc.add_periodic_callback(self.update_real_time, self.update_time)
+            self.periodic_callback = doc.add_periodic_callback(self._tick(doc, self.update_real_time), self.update_time)
 
             if self.sr_data.sr is not None and self.sr_data.sr.is_open:
                 self.sr_data.sr.close()

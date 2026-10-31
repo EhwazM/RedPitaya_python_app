@@ -318,9 +318,9 @@ class Oscilloscope(QMainWindow):
     def _build_logo_row(self) -> QHBoxLayout:
         logo_layout = QHBoxLayout()
         self.uni_logo = QLabel()
-        self.uni_logo.setPixmap(QPixmap(resource_path("assets/ua.png")).scaledToWidth(75))
+        self.uni_logo.setPixmap(QPixmap(resource_path("docs/ua.png")).scaledToWidth(75, Qt.TransformationMode.SmoothTransformation))
         self.group_logo = QLabel()
-        self.group_logo.setPixmap(QPixmap(resource_path("assets/geoel.png")).scaledToWidth(100))
+        self.group_logo.setPixmap(QPixmap(resource_path("docs/geoel.png")).scaledToWidth(100, Qt.TransformationMode.SmoothTransformation))
         logo_layout.addWidget(self.uni_logo)
         logo_layout.addWidget(self.group_logo)
         return logo_layout
@@ -423,7 +423,11 @@ class Oscilloscope(QMainWindow):
             # /waveform via the existing on_change_callback.
             gen_widget.default_values()
         self.reset_all()
-        self.change_to_real_time_mode()
+
+        if self.rp_plot.osci:
+            self.change_osci_mode()
+        else:
+            self.change_to_real_time_mode()
 
     # ------------------------------------------------------------------ #
     # Navigation
