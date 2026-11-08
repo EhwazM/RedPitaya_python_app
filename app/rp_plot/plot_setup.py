@@ -42,6 +42,8 @@ class BokehPlot:
         # Serialises connect_rp() so a background connect (launched from
         # main.py) and a lazy reconnect from generate_signal() can't race.
         self._connect_lock = threading.Lock()
+        self._reconnecting = False
+        self._next_reconnect = 0.0
 
         self.periodic_callback = None
         self.doc = None
@@ -203,41 +205,41 @@ class BokehPlot:
             )
     
     def update_oscilloscope_scpi(self):
-
         # Nothing to read until connect_rp() has opened the socket.
+        if not self.reading:
+            return
+
+        if not self.rp.has_socket:
+            if not self.rp_connected:
+                self._schedule_reconnect()
+                return
+            
         if self.reading and self.rp.has_socket:
             try:
                 y1, y2 = self.rp.read_data(decimation=self.decimation, trigger_level=self.trigger_level, trigger_source=self.trigger_source, center=self.trigger_delay)  # type: ignore
-            except Exception as e:
-                print("SCPI read_data error:", e)
-                # Without this, a broken socket (peer closed, reset,
-                # etc.) is never replaced: self.rp keeps wrapping the
-                # same dead connection forever, so every future tick
-                # hits this same except block on the same dead socket
-                # instead of ever recovering.
-                try:
-                    self.rp.connect()
-                except Exception as reconnect_exc:
-                    print("SCPI reconnect error:", reconnect_exc)
+            # SystemExit too: the SCPI client may call sys.exit() on socket
+            # failure, which must not take the whole application down.
+            except (Exception, SystemExit) as e:
+                self._on_link_error(e)
                 return
-
+ 
             if len(y1) == 0 or len(y2) == 0:
                 print("SCPI returned empty arrays")
                 return
-
+ 
             fs = float(self.sampling_rate) / self.decimation
             n = min(len(y1), len(y2))
-
+ 
             if n % 2 != 0:
                 n -= 1
                 y1 = y1[:n]
                 y2 = y2[:n]
-
+ 
             half = n // 2
             y1 = y1[:n]
             y2 = y2[:n]
             t = (np.arange(-half, half) / fs) * 1e6   # centred on zero
-
+ 
         else:
             return
 
@@ -247,7 +249,33 @@ class BokehPlot:
         except Exception as e:
             print("Bokeh stream error:", e)
 
-    
+    RECONNECT_INTERVAL_S = 3.0
+ 
+    def _on_link_error(self, exc) -> None:
+        """The board stopped answering (powered off, cable pulled, ...)."""
+        if self.rp_connected:  # report once, not on every tick
+            print("Red Pitaya connection lost:", exc)
+        self.rp_connected = False   # also turns the window's status LED red
+        self._schedule_reconnect()
+ 
+    def _schedule_reconnect(self) -> None:
+        """Retry connect_rp() in a background thread, at most every
+        RECONNECT_INTERVAL_S, so a dead board never blocks the plot."""
+        now = time.monotonic()
+        if self._reconnecting or now < self._next_reconnect or not self.rp_ip:
+            return
+        self._reconnecting = True
+        self._next_reconnect = now + self.RECONNECT_INTERVAL_S
+ 
+        def worker():
+            try:
+                self.connect_rp()
+            finally:
+                self._reconnecting = False
+ 
+        threading.Thread(target=worker, name="scpi-reconnect", daemon=True).start()
+
+
     def update_real_time(self):
         if self.reading:
             result = self.sr_data.collect_data()

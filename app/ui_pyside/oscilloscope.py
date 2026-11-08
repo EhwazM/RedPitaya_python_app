@@ -1,6 +1,7 @@
 ﻿from PySide6.QtCore import QUrl, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QTabWidget, QDoubleSpinBox, QSpinBox,
     QComboBox, QPushButton, QSizePolicy, QFormLayout,
@@ -316,14 +317,43 @@ class Oscilloscope(QMainWindow):
         update_func(min_val=mid - new_range / 2, max_val=mid + new_range / 2)
 
     def _build_logo_row(self) -> QHBoxLayout:
-        logo_layout = QHBoxLayout()
+        layout = QHBoxLayout()
+    
+        logo_frame = QFrame()
+        logo_frame.setStyleSheet("""
+            QFrame {
+                background-color: #6b6b6b;
+                border: 1px solid #858585;
+                border-radius: 12px;
+            }
+
+            QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+
+        logo_layout = QHBoxLayout(logo_frame)
+        logo_layout.setContentsMargins(10, 6, 10, 6)
+        logo_layout.setSpacing(7)
+
         self.uni_logo = QLabel()
-        self.uni_logo.setPixmap(QPixmap(resource_path("docs/ua.png")).scaledToWidth(75, Qt.TransformationMode.SmoothTransformation))
+        self.uni_logo.setPixmap(
+            QPixmap(resource_path('docs/ua.png')).scaledToWidth(75, Qt.TransformationMode.SmoothTransformation)
+        )
+        self.uni_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         self.group_logo = QLabel()
-        self.group_logo.setPixmap(QPixmap(resource_path("docs/geoel.png")).scaledToWidth(100, Qt.TransformationMode.SmoothTransformation))
-        logo_layout.addWidget(self.uni_logo)
-        logo_layout.addWidget(self.group_logo)
-        return logo_layout
+        self.group_logo.setPixmap(
+            QPixmap(resource_path('docs/geoel.png')).scaledToWidth(100, Qt.TransformationMode.SmoothTransformation)
+        )
+        self.group_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        logo_layout.addWidget(self.uni_logo, 1)
+        logo_layout.addWidget(self.group_logo, 1)
+
+        layout.addWidget(logo_frame)
+        return layout
 
     def _start_background_timers(self):
         self.check_timer = QTimer(self)

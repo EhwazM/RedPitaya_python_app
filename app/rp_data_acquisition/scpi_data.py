@@ -9,12 +9,13 @@ ADC_CLOCK = 125e6
 
 
 class ScpiData:
-    def __init__(self, ip_address, port=5000):
+    def __init__(self, ip_address, port=5000, timeout=5.0):
         self.ip_address = ip_address
         self.port = port
         # No socket is opened here. The connection is made explicitly with
         # connect(), once the Red Pitaya's address is actually known and the
         # board is ready (constructing this object must never touch the network).
+        self.timeout = timeout
         self.rp: scpi.scpi | None = None
         self.decimation = int(2**3)
         self.window = 8192            # samples returned per frame (centred on the trigger)
@@ -37,7 +38,7 @@ class ScpiData:
     def connect(self):
         self.close()  # drop any previous socket instead of leaking it
         # NOTE: scpi.scpi(host, timeout, port) -> pass the port by keyword
-        self.rp = scpi.scpi(self.ip_address, port=self.port)
+        self.rp = scpi.scpi(self.ip_address, timeout=self.timeout, port=self.port)
 
     def generate_signal(self, channel=1, frequency=15000, amplitude=0.75, offset=0.0, waveform='sine'):
         """

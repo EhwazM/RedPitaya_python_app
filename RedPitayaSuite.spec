@@ -6,9 +6,9 @@
 
 from PyInstaller.utils.hooks import collect_all
 
-# Everything in assets/ (logos, ...) is copied next to the code inside the
-# bundle. Code finds it through app.paths.resource_path("assets/...").
-datas = [("assets", "assets")]
+# Everything in docs/ (logos, ...) is copied next to the code inside the
+# bundle. Code finds it through app.paths.resource_path("docs/...").
+datas = [("docs", "docs")]
 binaries = []
 hiddenimports = []
 

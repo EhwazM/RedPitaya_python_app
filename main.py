@@ -322,7 +322,10 @@ class ModeSelector(QMainWindow):
 
     def _cleanup_ssh(self):
         if self.rp_ssh is not None:
-            self.rp_ssh.disconnect()
+            try:
+                self.rp_ssh.disconnect()
+            except Exception as exc:  # board already gone: nothing to close
+                print("SSH disconnect error (ignored):", exc)
             self.rp_ssh = None
 
     # ------------------------------------------------------------------ #
@@ -350,12 +353,12 @@ class ModeSelector(QMainWindow):
 
         self.uni_logo = QLabel()
         self.uni_logo.setPixmap(
-            QPixmap(resource_path("assets/ua.png")).scaledToWidth(75)
+            QPixmap(resource_path("docs/ua.png")).scaledToWidth(125, Qt.TransformationMode.SmoothTransformation)
         )
 
         self.group_logo = QLabel()
         self.group_logo.setPixmap(
-            QPixmap(resource_path("assets/geoel.png")).scaledToWidth(100)
+            QPixmap(resource_path("docs/geoel.png")).scaledToWidth(200, Qt.TransformationMode.SmoothTransformation)
         )
 
         layout.addWidget(self.uni_logo)
@@ -565,7 +568,11 @@ class ModeSelector(QMainWindow):
 
     def _toggle_connection(self):
         if self.rp_ssh is not None and self.rp_ssh.connected:
-            self.rp_ssh.disconnect()
+            try:
+                self.rp_ssh.disconnect()
+            except Exception as exc:  # board already gone: nothing to close
+                print("SSH disconnect error (ignored):", exc)
+
             self.rp_ssh = None
             self.connect_button.setText("Connect")
             self.connection_status_label.setText("Not connected")

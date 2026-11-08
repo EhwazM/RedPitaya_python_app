@@ -95,6 +95,9 @@ def set_label_text(label: QLabel, text: str) -> None:
 # Raise it if any control looks cramped.
 SIDEBAR_WIDTH = 400
 
+# Consecutive failed polls before the board is considered disconnected.
+MAX_POLL_FAILURES = 3
+
 # --- Display precision -------------------------------------------------------
 # With a heavy filter (e.g. K=31, 8 stages) the readings are stable to many more
 # digits than before, so show plenty. Raise/lower these to taste.
@@ -294,6 +297,7 @@ class LockInAmp(QMainWindow):
         # with the *current* B2V, so they follow B2V changes immediately.
         self.stats_window = 100
         self.stats_running = True  # False = statistics frozen (Stop)
+        self._poll_failures = 0
         self._stat_buffers: dict[str, deque] = {
             key: deque(maxlen=self.stats_window) for key in ("I", "Q", "R", "phase")
         }
@@ -315,7 +319,7 @@ class LockInAmp(QMainWindow):
             self.statusBar().showMessage(f"Connected to LIA at {self.host}:{self.port}")
             if self.iq_poll_checkbox.isChecked():
                 self.iq_timer.start(self.iq_poll_interval_spinbox.value())
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
             self.statusBar().showMessage(f"LIA connection failed: {exc}")
 
     def closeEvent(self, event) -> None:
@@ -326,9 +330,9 @@ class LockInAmp(QMainWindow):
         if self.lia.connected:
             try:
                 self.lia.soft_reset()
-            except Exception:
+            except (Exception, SystemExit):
                 pass
-            self.lia.disconnect()
+            self._safe_disconnect()
         event.accept()
 
         if self._quit_app_on_close:
@@ -868,8 +872,46 @@ class LockInAmp(QMainWindow):
                 self.frequency_spinbox.blockSignals(True)
                 self.frequency_spinbox.setValue(external_frequency)
                 self.frequency_spinbox.blockSignals(False)
-        except Exception as exc:
-            self.statusBar().showMessage(f"I/Q read error: {exc}")
+        except (Exception, SystemExit) as exc:
+            self._poll_failures += 1
+            if self._poll_failures >= MAX_POLL_FAILURES:
+                self._on_connection_lost(exc)
+            else:
+                self.statusBar().showMessage(f"I/Q read error: {exc}")
+        else:
+            self._poll_failures = 0
+ 
+    def _on_connection_lost(self, exc) -> None:
+        """The board stopped answering: stop polling instead of hammering a
+        dead socket, and tell the user how to recover."""
+        self.iq_timer.stop()
+        self.iq_poll_checkbox.blockSignals(True)
+        self.iq_poll_checkbox.setChecked(False)
+        self.iq_poll_checkbox.blockSignals(False)
+        self._poll_failures = 0
+        self._safe_disconnect()
+        self.statusBar().showMessage("Red Pitaya disconnected - use Tools > Reconnect")
+        QMessageBox.warning(
+            self,
+            "Red Pitaya Disconnected",
+            "The Red Pitaya stopped responding, so live polling was stopped.\n"
+            "Check the power and network, then use Tools > Reconnect to Red Pitaya.\n\n"
+            f"Details: {exc}",
+        )
+ 
+    def _safe_disconnect(self) -> None:
+        try:
+            self.lia.disconnect()
+        except (Exception, SystemExit):
+            pass  # the link is already dead; there is nothing left to close
+ 
+    def reconnect_redpitaya(self) -> None:
+        self.iq_timer.stop()
+        self._poll_failures = 0
+        self._safe_disconnect()
+        self.iq_poll_checkbox.setChecked(True)
+        self.connect_redpitaya()
+
 
     def update_iq_values(
         self,
@@ -938,6 +980,9 @@ class LockInAmp(QMainWindow):
         tools_back_action = QAction('Back to Main Menu', self)
         tools_back_action.triggered.connect(self.go_back_to_menu)
         tools_menu.addAction(tools_back_action)
+        reconnect_action = QAction('Reconnect to Red Pitaya', self)
+        reconnect_action.triggered.connect(self.reconnect_redpitaya)
+        tools_menu.addAction(reconnect_action)
         help_menu = menu_bar.addMenu("Help")
         about_action = QAction('About', self)
         about_action.triggered.connect(lambda: self.statusBar().showMessage('Red Pitaya Lock-In Amplifier'))

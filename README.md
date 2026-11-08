@@ -14,10 +14,7 @@
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
-  - [Configuration](#configuration)
 - [Usage](#usage)
-- [Project Structure](#project-structure)
-- [Testing](#testing)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -68,21 +65,20 @@ The following demonstrations showcase the system's graphical interface and its m
 
 ## Getting Started
 
-Start the application with exceutable inside dist:
+Start the application with exceutable inside dist.
+
+Set up the hostname of your Red Pitaya and password and have fun!
 
 <p align="center">
   <img src="docs/readme/demo_main.gif" width="45%" alt="Main interface">
 </p>
 
-set up the hostname of your Red Pitaya and password and have fun!
-
 ### Prerequisites
 
 List what needs to be installed before running the project:
 
-- [Node.js](https://nodejs.org/) >= 18
+- [uv](https://docs.astral.sh/uv/)
 - [Git](https://git-scm.com/)
-- Any other dependency (database, API keys, etc.)
 
 ### Installation
 
@@ -110,7 +106,7 @@ Show the most common ways to run and use the project.
 uv run main.py
 ```
 
-## Project Structure
+<!-- ## Project Structure
 
 ```text
 RedPittaya_python_app
@@ -156,10 +152,7 @@ RedPittaya_python_app
 │   ├── testing_plots.ipynb
 │   └── test.ipynb
 └── uv.lock
-```
-
-## Testing
-
+``` -->
 
 ## Roadmap
 
@@ -194,4 +187,4 @@ Project link: [https://github.com/EhwazM/RedPitaya_python_app](https://github.co
 ## Acknowledgments
 
 - [Resource or library you used](https://example.com)
-- Thanks to my family, friends a girlfried for being so supportive of me
+- Thanks to my family, friends and girlfried for being so supportive of me
