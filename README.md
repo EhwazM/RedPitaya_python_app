@@ -59,8 +59,8 @@ This project implements that technique on an **FPGA**, and provides a **Python d
 The following demonstrations showcase the system's graphical interface and its main functionalities, including real-time signal visualization, oscilloscope operation, and lock-in amplifier measurements.
 
 <p align="center">
-  <img src="docs/readme/demo_osci.gif" width="35%" alt="Oscilloscope">
-  <img src="docs/readme/demo_lia.gif" width="35%" alt="Lock-in amplifier">
+  <img src="docs/readme/demo_osci.gif" width="45%" alt="Oscilloscope">
+  <img src="docs/readme/demo_lia.gif" width="45%" alt="Lock-in amplifier">
 </p>
 
 ## Getting Started
@@ -70,7 +70,7 @@ Start the application with exceutable inside dist.
 Set up the hostname of your Red Pitaya and password and have fun!
 
 <p align="center">
-  <img src="docs/readme/demo_main.gif" width="45%" alt="Main interface">
+  <img src="docs/readme/demo_main.gif" width="65%" alt="Main interface">
 </p>
 
 ### Prerequisites
